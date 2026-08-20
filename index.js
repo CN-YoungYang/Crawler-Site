@@ -175,8 +175,8 @@ async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDe
   async function runOnce() {
     const initialDelay = getRandomDelay(minDelay, maxDelay);
     log(`站点 [${siteNorm}] 将在 ${(initialDelay / 1000).toFixed(1)} 秒后开始运行`, { event: 'schedule_wait', context: { site: siteNorm, delayMs: initialDelay }, site: siteNorm });
-    await new Promise(resolve => setTimeout(resolve, initialDelay));
-    if (isStopping()) return;
+    const slept = await sleepInterruptible(initialDelay);
+    if (!slept || isStopping()) return;
     log(`开始爬取 [${siteNorm}]，总页数：${totalPages}，间隔时间：${interval}毫秒`, { event: 'schedule_run', context: { site: siteNorm, totalPages, interval }, site: siteNorm });
     try {
       await crawl({ site: siteNorm, totalPages, interval });
@@ -276,6 +276,10 @@ async function scheduleLoop(input) {
 }
 
 async function sleepInterruptible(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    if (!Number.isFinite(ms)) log(`sleepInterruptible 非法 ms=${String(ms)}，已跳过`, { level: 'warn', event: 'sleep_invalid', context: { ms: String(ms) } });
+    return !isStopping();
+  }
   const end = Date.now() + ms;
   while (Date.now() < end) {
     if (isStopping()) return false;

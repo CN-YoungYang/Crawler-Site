@@ -2,20 +2,31 @@
 // 列表页: https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html
 // 风控敏感：VAPTCHA 已在当前页面注释但仍有 JSESSIONID/acw_tc，禁止并发，必须串行+抖动
 
-function formatDate(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// 上海时区日期（与 crawler.js#shanghaiDateStr 同款，TZ 无关）
+function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
+  return new Date(nowMs + 8 * 3600000 + offsetDays * 86400000).toISOString().slice(0, 10);
 }
 
-function searchDateForDates(dates) {
-  const d = new Date();
-  if (dates === 300) {
-    d.setFullYear(d.getFullYear() - 25);
-  } else if (dates === 30 || dates === 90) {
-    d.setMonth(d.getMonth() - Math.floor(dates / 30));
-  } else if ([0, 2, 3, 7].includes(dates)) {
-    d.setDate(d.getDate() - dates);
+function formatDate(d) {
+  // 兼容旧调用：若传入 Date，按上海时区格式化；否则按本地（保留但不再用于 buildUrl）
+  if (d instanceof Date) {
+    return new Date(d.getTime() + 8 * 3600000).toISOString().slice(0, 10);
   }
-  return formatDate(d);
+  return String(d);
+}
+
+function searchDateForDates(dates, nowMs = Date.now()) {
+  // 基于上海 wall-clock 计算，避免本地 TZ 漂移与 setMonth 回绕
+  const shanghai = new Date(nowMs + 8 * 3600000);
+  if (dates === 300) {
+    shanghai.setUTCFullYear(shanghai.getUTCFullYear() - 25);
+  } else if (dates === 30 || dates === 90) {
+    // 修复：原 setMonth 回绕（3-31 减 1 月 → 3-03），改为按天减
+    shanghai.setUTCDate(shanghai.getUTCDate() - dates);
+  } else if ([0, 2, 3, 7].includes(dates)) {
+    shanghai.setUTCDate(shanghai.getUTCDate() - dates);
+  }
+  return shanghai.toISOString().slice(0, 10);
 }
 
 function extractId(link) {
@@ -47,15 +58,15 @@ function buildUrl(pageNo) {
   const area = this.area ?? '420000';
   const page = Math.max(1, parseInt(pageNo, 10) || 1);
 
-  const searchDate = searchDateForDates(dates);
+  const nowMs = Date.now();
+  const searchDate = searchDateForDates(dates, nowMs);
 
-  // 窗口：昨日 00:00:00 ~ 今日 23:59:59，与 yfbzb 的今/昨天去重语义一致
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
+  // 窗口：昨日 00:00:00 ~ 今日 23:59:59，与 yfbzb 的今/昨天去重语义一致（固定上海时区）
+  const today = shanghaiDateStr(0, nowMs);
+  const yesterday = shanghaiDateStr(-1, nowMs);
 
-  const startcheckDate = formatDate(yesterday);
-  const endcheckDate = `${formatDate(today)} 23:59:59`;
+  const startcheckDate = yesterday;
+  const endcheckDate = `${today} 23:59:59`;
 
   const base = 'https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html';
   const params = [

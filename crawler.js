@@ -194,14 +194,36 @@ function isStopping() {
   return stopping;
 }
 
+// 本地可中断休眠（与 index.js#sleepInterruptible 同逻辑，避免 index↔crawler 循环依赖）
+async function sleepInterruptibleLocal(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    if (!Number.isFinite(ms)) log(`sleepInterruptible 非法 ms=${String(ms)}，已跳过`, { level: 'warn', event: 'sleep_invalid', context: { ms: String(ms) } });
+    return !stopping;
+  }
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (stopping) return false;
+    await new Promise(r => setTimeout(r, Math.min(1000, end - Date.now())));
+  }
+  return !stopping;
+}
+
 function loadCheckpoint(site) {
   const file = stateFile(site);
   if (!fs.existsSync(file)) return null;
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    let cp = Number(raw.currentPage);
+    if (!Number.isFinite(cp) || !Number.isInteger(cp) || cp < 1) {
+      log(`checkpoint currentPage 非法 (${String(raw.currentPage)})，已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw.currentPage), site: normalizeSite(site) }, site: normalizeSite(site) });
+      return null;
+    }
+    let ids = raw.existingIds;
+    if (!Array.isArray(ids)) ids = [];
+    ids = ids.filter(x => typeof x === 'string' && x);
     return {
-      currentPage: raw.currentPage,
-      existingIds: new Set(raw.existingIds || [])
+      currentPage: cp,
+      existingIds: new Set(ids)
     };
   } catch (error) {
     log(`checkpoint 读取失败，从头开始：${error.message}`, { level: 'warn', event: 'checkpoint_load_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
@@ -348,7 +370,8 @@ async function crawl(a, b, c, d) {
     }
 
     if (!shouldStopCrawling) {
-      await new Promise(resolve => setTimeout(resolve, interval));
+      const ok = await sleepInterruptibleLocal(interval);
+      if (!ok || stopping) shouldStopCrawling = true;
     }
   }
 
