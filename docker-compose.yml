@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   crawler:
     image: rxyoungyang/crawler:latest
@@ -5,7 +7,7 @@ services:
     env_file:
       - .env
     environment:
-      # 未在 .env 中设置时兜底，多站点并发（yfbzb + ceb）
+      # 未在 .env 中设置时兜底，多站点并发（yfbzb 湖北乙方宝 + ceb 中国招标公共服务平台湖北）
       - SITES=${SITES:-yfbzb,ceb}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
