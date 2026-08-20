@@ -167,46 +167,56 @@ const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
 :root {
   color-scheme: light dark;
 
-  --bg: #f4f1eb;
-  --bg-subtle: #fffdf9;
-  --bg-hover: #f1ece4;
+  --bg: #f8f6f3;
+  --bg-subtle: #ffffff;
+  --bg-hover: #f1ece8;
+  --bg-muted: #ede9e3;
 
-  --fg: #242321;
-  --fg-muted: #78736b;
+  --fg: #1c1c1a;
+  --fg-muted: #7a7670;
+  --fg-faint: #9a9590;
 
-  --border: #ded8cf;
-  --border-strong: #bdb5aa;
+  --border: #e8e2d9;
+  --border-strong: #c8bdb0;
 
   --accent: #b4532d;
   --accent-hover: #8f3f24;
+  --accent-soft: rgba(180, 83, 45, 0.09);
+  --accent-line: #b4532d;
 
   --font-sans: "Aptos", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 
-  --radius-sm: 4px;
-  --radius: 10px;
+  --radius-sm: 6px;
+  --radius: 12px;
+  --radius-pill: 999px;
 
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
   --space-md: 1rem;
   --space-lg: 1.5rem;
   --space-xl: 2.5rem;
+  --nav-max: 72rem;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #030712;
-    --bg-subtle: #111827;
-    --bg-hover: #1f2937;
+    --bg: #0e0e10;
+    --bg-subtle: #1a1a1e;
+    --bg-hover: #252529;
+    --bg-muted: #1f1f23;
 
-    --fg: #f9fafb;
-    --fg-muted: #9ca3af;
+    --fg: #f5f4f1;
+    --fg-muted: #a1a1aa;
+    --fg-faint: #71717a;
 
-    --border: #1f2937;
-    --border-strong: #374151;
+    --border: #27272a;
+    --border-strong: #3f3f46;
 
-    --accent: #60a5fa;
-    --accent-hover: #93c5fd;
+    --accent: #e86a33;
+    --accent-hover: #ff7d45;
+    --accent-soft: rgba(232, 106, 51, 0.13);
+    --accent-line: #e86a33;
   }
 }
 `;
@@ -484,110 +494,270 @@ const COMMON_CSS = `
 `;
 
 const NAV_CSS = `
-  .site-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-lg);
-    margin-bottom: var(--space-xl);
-  }
-  .site-card {
+  /* Nav utility bar */
+  .nav-utility {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-md);
-    padding: var(--space-lg);
-    border: 1px solid var(--border);
-    background: var(--bg-subtle);
-    text-decoration: none;
-    color: inherit;
-    transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease;
-  }
-  .site-card:hover {
-    border-color: var(--accent);
-    background: var(--bg-hover);
-    transform: translateY(-2px);
-  }
-  .site-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .site-card:active { transform: translateY(0) scale(0.99); }
-  .site-card-header {
-    display: flex;
-    align-items: flex-start;
     justify-content: space-between;
-    gap: var(--space-sm);
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 0 0.95rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
   }
-  .site-card-title {
-    margin: 0;
-    font-size: 1.25rem;
-    font-weight: 700;
+  .nav-utility-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 650;
+    color: var(--fg);
+    letter-spacing: 0.06em;
+  }
+  .nav-utility-kicker::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+  .nav-utility-meta {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    white-space: nowrap;
+  }
+  .nav-utility-meta a {
+    color: var(--fg-muted);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    padding-bottom: 1px;
+  }
+  .nav-utility-meta a:hover { color: var(--fg); border-bottom-color: var(--border-strong); }
+
+  /* Hero: asymmetric split */
+  .nav-hero {
+    display: grid;
+    grid-template-columns: 1.35fr 0.9fr;
+    gap: 2rem;
+    align-items: end;
+    padding-bottom: 2rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-hero-title {
+    margin: 0 0 0.7rem;
+    font-size: clamp(2rem, 4.2vw, 3.25rem);
+    font-weight: 750;
+    line-height: 0.95;
+    letter-spacing: -0.03em;
     color: var(--fg);
   }
-  .site-card-key {
-    display: inline-flex;
-    padding: 0.125rem 0.5rem;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    font-weight: 600;
+  .nav-hero-desc {
+    margin: 0;
+    max-width: 34rem;
     color: var(--fg-muted);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: 0.94rem;
+    line-height: 1.65;
   }
-  .site-card-desc {
+  .nav-hero-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    overflow: hidden;
+  }
+  .nav-hero-stat {
+    padding: 1rem 1.1rem;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+  }
+  .nav-hero-stat:nth-child(2n) { border-right: none; }
+  .nav-hero-stat:nth-last-child(-n+2) { border-bottom: none; }
+  .nav-hero-stat-label {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    font-weight: 600;
+  }
+  .nav-hero-stat-value {
+    font-family: var(--font-mono);
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--fg);
+    letter-spacing: -0.02em;
+  }
+  .nav-hero-stat-value.small {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nav-hero-stat--accent { background: var(--accent-soft); }
+
+  /* Section head */
+  .nav-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+  }
+  .nav-section-title { margin: 0; font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; color: var(--fg); }
+  .nav-section-note { font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg-muted); }
+
+  /* Site list: editorial rows */
+  .site-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    margin-bottom: 1.5rem;
+  }
+  .site-row {
+    display: grid;
+    grid-template-columns: 3.4rem 1fr auto;
+    gap: 1.2rem;
+    align-items: center;
+    padding: 1.3rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+    transition: background 160ms ease;
+    cursor: pointer;
+  }
+  .site-row:last-child { border-bottom: none; }
+  .site-row:hover { background: var(--bg-hover); }
+  .site-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .site-row:focus-within { background: var(--bg-hover); }
+  .site-row-index {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--fg-faint);
+  }
+  .site-row:hover .site-row-index { border-color: var(--accent); color: var(--accent); }
+  .site-row-main { min-width: 0; display: flex; flex-direction: column; gap: 0.42rem; }
+  .site-row-header { display: flex; align-items: baseline; gap: 0.65rem; flex-wrap: wrap; }
+  .site-row-title { margin: 0; font-size: 1.07rem; font-weight: 750; letter-spacing: -0.015em; color: var(--fg); line-height: 1.25; }
+  .site-row-key {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.14rem 0.42rem;
+    background: var(--bg-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+  }
+  .site-row-desc {
     margin: 0;
     color: var(--fg-muted);
-    font-size: 0.875rem;
+    font-size: 0.84rem;
     line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .site-card-stats {
+  .site-row-stats {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-md);
-    padding-top: var(--space-sm);
+    gap: 0.35rem 1rem;
+    padding-top: 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .site-row-stats strong { color: var(--fg); font-weight: 700; font-size: 0.81rem; }
+  .site-row-stats span { display: inline-flex; align-items: center; gap: 0.32rem; }
+  .site-row-stats .sep { width: 1px; height: 0.85em; background: var(--border); display: inline-block; }
+  .site-row-action { display: flex; align-items: center; justify-content: center; min-width: 2.5rem; }
+  .site-row-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-faint);
+    font-size: 0.85rem;
+    line-height: 1;
+    text-decoration: none;
+    transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
+  }
+  .site-row:hover .site-row-arrow { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .site-row-arrow:active { transform: scale(0.96); }
+  .site-row-origin {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.03em;
+    color: var(--fg-faint);
+    text-decoration: none;
+    opacity: 0.9;
+    border-bottom: 1px dashed transparent;
+    padding-bottom: 1px;
+    transition: color 150ms ease, border-color 150ms ease, opacity 150ms ease;
+  }
+  .site-row-origin:hover { color: var(--fg-muted); border-bottom-color: var(--border-strong); opacity: 1; }
+  .site-row-origin:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  .site-row-origin-icon { font-size: 0.72em; opacity: 0.5; transform: translateY(-0.5px); }
+  .site-row-origin-wrap { display: flex; margin-top: 0.15rem; }
+  .site-row--empty .site-row-stats { color: var(--fg-faint); }
+  .site-row--empty .site-row-stats strong { color: var(--fg-muted); }
+
+  .nav-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    padding-top: 0.9rem;
     border-top: 1px solid var(--border);
     font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--fg-muted);
+    font-size: 0.71rem;
+    color: var(--fg-faint);
   }
-  .site-card-stats strong { color: var(--fg); font-size: 0.875rem; }
-  .site-card-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    margin-top: auto;
-    padding-top: var(--space-sm);
+  .nav-footer a { color: var(--fg-muted); text-decoration: none; }
+  .nav-footer a:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
+
+  @media (max-width: 860px) {
+    .nav-hero { grid-template-columns: 1fr; gap: 1.25rem; }
+    .site-row { grid-template-columns: 3rem 1fr 2.2rem; }
   }
-  .site-card-cta {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.45rem 0.9rem;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 0.8125rem;
-    font-weight: 600;
-    text-decoration: none;
-    transition: background 180ms ease, transform 180ms ease;
-  }
-  .site-card-cta:hover { background: var(--accent-hover); text-decoration: none; }
-  .site-card-cta:active { transform: scale(0.97); }
-  .site-card-origin {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    color: var(--fg-muted);
-    font-size: 0.8125rem;
-    text-decoration: none;
-  }
-  .site-card-origin:hover { color: var(--accent); text-decoration: none; }
-  .site-card-stats-empty { color: var(--fg-muted); font-size: 0.8125rem; }
   @media (max-width: 640px) {
-    .site-grid { grid-template-columns: 1fr; }
-  }
-  @media (prefers-color-scheme: dark) {
-    .site-card-cta { color: #fff; }
+    .nav-utility { flex-direction: column; align-items: flex-start; gap: 0.3rem; }
+    .nav-hero-stats { border-left: none; border-right: none; }
+    .site-row { padding: 1rem; gap: 0.9rem; }
+    .site-row-desc { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .site-row-stats { gap: 0.35rem 0.7rem; }
+    .nav-footer { flex-direction: column; gap: 0.4rem; }
   }
 `;
 
@@ -597,27 +767,35 @@ function buildNavHtml(sitesData) {
   const totalRecords = sitesData.reduce((n, s) => n + s.totalRecords, 0);
   const totalDates = sitesData.reduce((n, s) => n + s.totalDates, 0);
 
-  const cardsHtml = sitesData.map(s => {
+  const rowsHtml = sitesData.map((s, idx) => {
     const hasData = s.totalDates > 0;
+    const num = String(idx + 1).padStart(2, '0');
     const statsHtml = hasData
-      ? `<div class="site-card-stats"><span>总计 <strong>${s.totalDates.toLocaleString('zh-CN')}</strong> 天</span><span>共 <strong>${s.totalRecords.toLocaleString('zh-CN')}</strong> 条</span><span>最近 <strong class="cell-mono">${s.latestUpdate}</strong></span></div>`
-      : `<div class="site-card-stats"><span class="site-card-stats-empty">暂无数据 · 完成首次爬取后显示</span></div>`;
-    const originLink = s.meta.originUrl
-      ? `<a class="site-card-origin" href="${s.meta.originUrl}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">↗ 原站</a>`
-      : '';
+      ? `<div class="site-row-stats"><span>总计 <strong>${s.totalDates.toLocaleString('zh-CN')}</strong> 天</span><span class="sep" aria-hidden="true"></span><span>共 <strong>${s.totalRecords.toLocaleString('zh-CN')}</strong> 条</span><span class="sep" aria-hidden="true"></span><span>最近 <strong class="cell-mono">${s.latestUpdate}</strong></span></div>`
+      : `<div class="site-row-stats"><span>暂无数据，完成首次爬取后显示</span></div>`;
+    let originLink = '';
+    if (s.meta.originUrl) {
+      let host = s.meta.originUrl;
+      try { host = new URL(s.meta.originUrl).hostname.replace(/^www\./, ''); } catch (_) {}
+      originLink = `<a class="site-row-origin" href="${s.meta.originUrl}" target="_blank" rel="noopener noreferrer" title="前往原站 ${host}">原站 <span class="site-row-origin-icon" aria-hidden="true">↗</span></a>`;
+    }
     const href = `${encodeURIComponent(s.site)}/index.html`;
-    return `<a class="site-card" href="${href}" aria-label="${s.meta.displayName}">
-      <div class="site-card-header">
-        <h2 class="site-card-title">${s.meta.displayName}</h2>
-        <span class="site-card-key">${s.site}</span>
-      </div>
-      <p class="site-card-desc">${s.meta.description || s.meta.subtitle || ''}</p>
-      ${statsHtml}
-      <div class="site-card-actions">
-        <span class="site-card-cta">查看报告 →</span>
-        ${originLink}
-      </div>
-    </a>`;
+    const emptyClass = hasData ? '' : ' site-row--empty';
+    return `<div class="site-row${emptyClass}" data-href="${href}" role="link" tabindex="0" aria-label="${s.meta.displayName}" onclick="if(!event.target.closest('a')) location.href=this.dataset.href" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();location.href=this.dataset.href}">
+      <span class="site-row-index">${num}</span>
+      <span class="site-row-main">
+        <span class="site-row-header">
+          <span class="site-row-title">${s.meta.displayName}</span>
+          <span class="site-row-key">${s.site}</span>
+        </span>
+        <span class="site-row-desc">${s.meta.description || s.meta.subtitle || ''}</span>
+        ${statsHtml}
+        ${originLink ? `<span class="site-row-origin-wrap">${originLink}</span>` : ''}
+      </span>
+      <span class="site-row-action" aria-hidden="true">
+        <span class="site-row-arrow">→</span>
+      </span>
+    </div>`;
   }).join('\n');
 
   const emptyHtml = totalSites === 0
@@ -635,25 +813,36 @@ function buildNavHtml(sitesData) {
 </head>
 <body>
 <div class="container">
-  <header class="header">
-    <h1 class="page-title">招标数据导航</h1>
-    <p class="page-meta">生成于 ${generatedAt} · 共 ${totalSites} 个站点 · ${totalDates.toLocaleString('zh-CN')} 个日期 · ${totalRecords.toLocaleString('zh-CN')} 条记录</p>
-  </header>
-
-  <div class="stats-grid">
-    <div class="stat-item"><span class="stat-label">站点数</span><span class="stat-value">${totalSites.toLocaleString('zh-CN')}</span></div>
-    <div class="stat-item"><span class="stat-label">总计日期</span><span class="stat-value">${totalDates.toLocaleString('zh-CN')}</span></div>
-    <div class="stat-item"><span class="stat-label">总计记录</span><span class="stat-value">${totalRecords.toLocaleString('zh-CN')}</span></div>
-    <div class="stat-item"><span class="stat-label">生成时间</span><span class="stat-value stat-value-small cell-mono">${generatedAt}</span></div>
+  <div class="nav-utility">
+    <span class="nav-utility-kicker">Crawler 导航</span>
+    <span class="nav-utility-meta"><span>生成于 ${generatedAt}</span><a href="/health">健康检查</a></span>
   </div>
 
-  <main>
-    <div class="filter-header">
-      <h2 class="section-title">全部站点</h2>
-      <span class="filter-status">点击卡片进入对应报告</span>
+  <header class="nav-hero">
+    <div>
+      <h1 class="nav-hero-title">招标数据导航</h1>
+      <p class="nav-hero-desc">汇聚多源招标公告，按发布日期分区归档，保留最近 30 天。选择站点进入对应报告，或前往原站核验原文。</p>
     </div>
-    ${totalSites ? `<div class="site-grid">${cardsHtml}</div>` : emptyHtml}
+    <div class="nav-hero-stats" aria-label="汇总统计">
+      <div class="nav-hero-stat"><span class="nav-hero-stat-label">站点</span><span class="nav-hero-stat-value">${totalSites.toLocaleString('zh-CN')}</span></div>
+      <div class="nav-hero-stat"><span class="nav-hero-stat-label">日期</span><span class="nav-hero-stat-value">${totalDates.toLocaleString('zh-CN')}</span></div>
+      <div class="nav-hero-stat"><span class="nav-hero-stat-label">记录</span><span class="nav-hero-stat-value">${totalRecords.toLocaleString('zh-CN')}</span></div>
+      <div class="nav-hero-stat nav-hero-stat--accent"><span class="nav-hero-stat-label">生成时间</span><span class="nav-hero-stat-value small">${generatedAt}</span></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="nav-section-head">
+      <h2 class="nav-section-title">全部站点</h2>
+      <span class="nav-section-note">${totalSites ? `共 ${totalSites} 个站点` : '暂无站点'}</span>
+    </div>
+    ${totalSites ? `<div class="site-list">${rowsHtml}</div>` : emptyHtml}
   </main>
+
+  <footer class="nav-footer">
+    <span>保留 30 天，过期自动清理，数据每日定时更新</span>
+    <span>生成于 ${generatedAt} <span style="opacity:.4; margin:0 0.35rem;">|</span> <a href="/health">/health</a></span>
+  </footer>
 </div>
 </body>
 </html>`;
