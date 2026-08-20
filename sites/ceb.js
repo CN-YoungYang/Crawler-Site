@@ -125,6 +125,9 @@ async function parse($, html, existingIds, siteConfig) {
 
 module.exports = {
   name: 'ceb',
+  displayName: '中国招标公共服务平台·湖北',
+  description: '中国招标投标公共服务平台 · 湖北地区招标公告',
+  originUrl: 'https://bulletin.cebpubservice.com',
   baseUrl: 'https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html',
   // 供 buildUrl 使用的可覆盖项
   dates: 300,

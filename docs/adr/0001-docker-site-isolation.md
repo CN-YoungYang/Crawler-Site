@@ -38,6 +38,18 @@
 - **变更**: `SITES` 逗号分隔 + `CRON_<SITE>`/`TOTAL_PAGES_<SITE>`/`SITES_CONFIG` 每站覆盖；`index.js` 每站 `scheduleLoopForSite` 并发（`Promise.all`）；`crawler.js` 委托 `sites/<site>.js` 策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`，`sites/_base.js` 默认）；`log.js` 要求 `log(msg,{site})` 显式传 `site` 以避免 `currentSite` 并发竞态；`report.js` `generateAllReports` 改 `Promise.all`；`docker-compose.yml` 单服务 `crawler` 替代一服务一站点。
 - **兼容**: `SITE` 单站点、`CRON_EXPR` 全局、`crawl({site})` 旧签名均保留；`yfbzb` 现有行为不变。
 
+## 修订 2026-08-20 — 总导航与静态服务（含进阶探针）
+
+- **背景**: 用户要求“导航页，显示 yfbzb 和 ceb 的入口”且“通过域名访问”，需在不引入前端构建的前提下提供可被外部反代的入口页。
+- **变更**:
+  - `sites/yfbzb.js`/`sites/ceb.js` 新增 `displayName`/`description`/`originUrl` 供导航卡片展示；
+  - `report.js` 新增 `collectSiteStats(site)`/`buildNavHtml(sitesData)`/`generateNav(sites)`（动态发现 `parseSitesList()`，`yfbzb`/`ceb` 置顶，`demo` 排除，缺失站点报告自动补空占位，`NAV_CSS`+`COMMON_CSS` 自适应，`file/index.html`+`file/tokens.css`）与 `generateAllReports(sites)` 末尾刷新导航，每站 `runOnce` 内 `crawl → generateReport → generateNav`；
+  - 新增 `server.js`（零依赖 `http`，`createServer`/`startServer`/`buildHealthPayload`，托管 `file/` 于 `HTTP_PORT` 默认 8080，`EXPOSE 8080`，路由 `/`→总导航、`/<site>/`→站点报告、`safeJoin` 防穿越、`HEAD` 支持，`GET /health|/healthz|/api/health` 进阶探针 `no-store` 返回 `{status,timestamp,uptime,navExists,navGeneratedAt,totals,sites[]}`）；
+  - `index.js` 启动时 `startServer()`+`generateNav(env.sites)` 预生成并在 `SIGINT`/`SIGTERM` 时关闭 HTTP 服务；
+  - `Dockerfile` 加 `EXPOSE 8080`，`docker-compose.yml` 加 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` + `healthcheck`（`node require('http').get(.../health)`，`interval 30s`）与 `HTTP_PORT`/`HTTP_ENABLED` env，`.env.example` 同步；
+  - 意图由外部反代承载 `80/443` 与 HTTPS，本容器仅暴露 `8080`，域名 `your.domain.com/`→总导航、`/<site>/`→报告、`/health`→探针。
+- **兼容**: `HTTP_ENABLED=false` 可禁用服务，`SITES` 单站点与旧 `file/<site>/` 报告路径不变；纯静态 `file/index.html` 仍可 `file://` 打开。
+
 ## 后果
 
 - 正面：换机器/重装可通过 `docker compose up -d` 常驻、`ghcr.io` 拉取、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。
@@ -56,3 +68,4 @@
 - 策略钩子：`buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`linkPrefix` 均有单测/冒烟覆盖；`SITES=yfbzb,demo` 并发冒烟 `file/yfbzb/` 与 `file/demo/`、`logs/yfbzb/` 与 `logs/demo/` 隔离且 `site` 前缀正确。
 - 每站独立定时：`CRON_YFBZB`/`CRON_DEMO`/`SITES_CONFIG` 解析与 `nextCronDelay` 逐站校验。
 - 本地 `docker build` + `docker compose up -d --build` + `docker compose logs -f crawler` 可观测多站点 `[yfbzb]`/`[demo]` 日志与 `file/<site>/` 产出；`docker stop` 触发所有站点当前批次优雅落盘。
+- 导航与静态服务：`SITES=yfbzb,ceb node -e "require('./report').generateNav()"` 生成 `file/index.html`（卡片 `yfbzb`/`ceb` 置顶，`displayName`+统计+`↗ 原站`，缺失报告自动补空）；`node -e "require('./server').createServer().listen(18080)"` 后 `curl /`→导航、`curl /yfbzb/`→报告、`curl /health`→`{status:"ok",totals,sites}`，`compose healthcheck` 30s 探活，外层反代 `80/443→8080` 后域名可访问。

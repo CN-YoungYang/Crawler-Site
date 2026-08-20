@@ -1,6 +1,8 @@
 # Crawler-Site
 
-Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 GHCR 自动发布。
+Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口）与 `ceb`（中国招标投标公共服务平台·湖北），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 GHCR 自动发布。内置轻量静态服务托管 `file/`，根 `/` 为总导航（动态发现 `yfbzb`/`ceb` 入口），每站报告在 `/<site>/`，`GET /health` 提供进阶探针供反代/监控与 `docker healthcheck` 使用，适合通过外部反代以域名对外暴露。
+
+> ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值见 `sites/_base.js`），`sites/yfbzb.js` 与 `sites/ceb.js` 为当前实站、`sites/demo.js` 为策略示例、`sites/site2.js` 为占位骨架。
 
 > ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值见 `sites/_base.js`），`sites/yfbzb.js` 为当前实站、`sites/demo.js` 为策略示例、`sites/site2.js` 为占位骨架。
 
@@ -9,6 +11,9 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 分页抓取招标信息：标题、链接、公告类型、地区、发布时间
 - 按 `id` 去重，避免重复入库（内存 + 落盘合并双重去重）
 - 按站点与发布日期分区存储为 Excel：`file/<site>/YYYY-MM-DD.xlsx`（如 `file/yfbzb/2026-08-19.xlsx`），历史扁平 `file/*.xlsx` 保留不迁移
+- 总导航 + 站点报告：`file/index.html` 总导航（动态发现 `sites/*`，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
+- 轻量静态服务：`server.js`（零依赖 `http`）托管 `file/` 于 `HTTP_PORT`（默认 8080，`EXPOSE 8080`），路由 `/` → 总导航、`/yfbzb/`/`/ceb/` → 各站报告、`HEAD` 支持、`xlsx` 下载头、防路径穿越，`HTTP_ENABLED=false` 可禁用；`docker-compose.yml` 已配 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` 与 `healthcheck`，适合由外部反代（Nginx/Caddy/Traefik）将 `80/443 → 8080` 以域名暴露
+- 进阶健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites,dates,records}, sites:[{site,displayName,description,totalDates,totalRecords,latestUpdate,hasReport}]}`（`no-store`），供 `docker healthcheck`、反代后端摘除与监控告警使用
 - 失败页与“数据到底”分离识别，越界页（403）不再误判为加载失败、不会因单页失败而提前终止整次爬取
 - 失败日志带 `error.code` / HTTP `status`，便于诊断
 - 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
@@ -62,6 +67,9 @@ node index.js
 | `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
 | `MAX_DELAY_S` / `MAX_DELAY` | 300 | 同位置参数 4；支持每站覆盖 `MAX_DELAY_S_<SITE>` |
 | `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（如 `0 2 * * *` 表每日 02:00）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_DEMO="0 3 * * *"`）或 `SITES_CONFIG` JSON |
+| `HTTP_PORT` / `PORT` | 8080 | 静态服务监听端口（托管 `file/`，`EXPOSE 8080`，`ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`）；由外部反代将 `80/443 → HTTP_PORT` 以域名暴露 |
+| `HTTP_ENABLED` | true | 设为 `false` 禁用内置静态服务（仅保留爬取与报告生成） |
+| `TZ` | `Asia/Shanghai` | 容器时区，必须与 `Dockerfile` `ENV TZ` 一致，否则日期分区错一天 |
 
 ```bash
 SITES=yfbzb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
@@ -77,20 +85,41 @@ SITES=yfbzb,demo SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"demo":{"cron":"0 3
 docker build -t crawler:local .
 docker compose up -d --build
 docker compose logs -f crawler
+curl http://127.0.0.1:8080/health | jq  # 进阶探针
 docker compose down
 ```
 
-`docker-compose.yml` 为单服务 `crawler`，通过 `SITES=yfbzb,demo` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据与日志通过 bind mount 持久化：
+`docker-compose.yml` 为单服务 `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
 
 ```yaml
+environment:
+  - SITES=${SITES:-yfbzb,ceb}
+  - HTTP_PORT=${HTTP_PORT:-8080}
+  - HTTP_ENABLED=${HTTP_ENABLED:-true}
+ports:
+  - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"  # 宿主机:容器，意图由外部反代 80/443 → HTTP_PORT
 volumes:
   - ./file:/app/file
   - ./logs:/app/logs
+healthcheck:
+  test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+  interval: 30s
 ```
 
-崩溃续跑如需保留 checkpoint，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-demo.json:/app/state-demo.json`。
+崩溃续跑如需保留 checkpoint，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-ceb.json:/app/state-ceb.json`。
 
-> 镜像 `TZ=Asia/Shanghai` 已在 `Dockerfile` 中固定（`tzdata`），否则 `readRecentIds()` / `publishTime` 分区会因 UTC 错一天。
+**域名暴露**（推荐由外部反代承载 80/443 与 HTTPS，本容器仅暴露 8080）：
+
+```nginx
+# Nginx 示例：your.domain.com → 127.0.0.1:8080
+server {
+  listen 80; server_name your.domain.com;
+  location / { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; }
+}
+# 访问：https://your.domain.com/ → 总导航，/yfbzb/ /ceb/ → 各站报告，/health → 探针
+```
+
+> 镜像 `TZ=Asia/Shanghai` 已在 `Dockerfile` 中固定（`tzdata` + `EXPOSE 8080`），否则 `readRecentIds()` / `publishTime` 分区会因 UTC 错一天。
 
 ## 输出
 
@@ -101,14 +130,14 @@ volumes:
   [2026-08-14T06:35:01.113Z] [PID: 10572] [yfbzb] 第 10 页无新增数据（站点边界），已爬至当日末尾
   ```
 
-- **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；报告（`index.html`/`tokens.css`/`<date>.html`）同落 `file/<site>/`。
+- **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 进阶探针、`GET /<site>/<date>.xlsx` → 下载。
 - **Checkpoint**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
 
 ## 工作原理
 
-整体数据流（`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js`）：
+整体数据流（`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js` → `server.js`）：
 
-1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`）。
+1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
@@ -161,26 +190,28 @@ volumes:
 
 ```
 crawler/
-├── index.js              # 入口：环境变量/参数解析、校验、调度（CRON/单次常驻）
+├── index.js              # 入口：环境变量/参数解析、校验、静态服务拉起、调度（CRON/单次常驻，每批后刷新导航）
 ├── crawler.js            # 爬取核心：crawl() 编排 + crawlPage() 逐页抓取 + checkpoint（按站点）
 ├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
-├── report.js             # 报告：scanFiles(site)/generateReport(site)，按站点生成 HTML
+├── report.js             # 报告：scanFiles/generateReport 按站点生成 HTML，generateNav/buildNavHtml 生成总导航 file/index.html
+├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 进阶探针
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/getSiteConfigs(sites)/parseSitesList()/listEnabledSites()
 │   ├── _base.js          # 默认策略：defaultBuildUrl/defaultParse/defaultExtractId/defaultIsBoundary
-│   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix
+│   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl
+│   ├── ceb.js            # 实站配置：buildUrl/parse/extractId/isBoundary/batchSize/headers + displayName/originUrl
 │   ├── demo.js           # 策略示例：buildUrl/parse/isBoundary/batchSize 等钩子示例
 │   └── site2.js          # 占位骨架：baseUrl 为空，fail-fast
-├── Dockerfile            # node:20-alpine + tzdata + TZ=Asia/Shanghai + USER node
-├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE>），bind mount file/logs
+├── Dockerfile            # node:20-alpine + tzdata + TZ=Asia/Shanghai + EXPOSE 8080 + USER node
+├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck），bind mount file/logs
 ├── .dockerignore
 ├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
 ├── docs/
-│   ├── adr/0001-docker-site-isolation.md  # Docker/GHCR/多站点隔离决策
+│   ├── adr/0001-docker-site-isolation.md  # Docker/GHCR/多站点隔离/导航静态服务决策
 │   └── agents/domain.md / issue-tracker.md
 ├── page_content.html     # 一份历史页面样本，离线验证 cheerio 选择器用
-├── file/                 # 输出：file/<site>/YYYY-MM-DD.xlsx + 报告（bind mount 持久化）
+├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（bind mount 持久化，server.js 托管）
 ├── logs/                 # 日志：logs/<site>/crawler-YYYY-MM-DD.jsonl（bind mount 持久化）
 ├── state-<site>.json     # 按站点 checkpoint（每批写入，正常完成即删）
 ├── package.json
@@ -194,5 +225,6 @@ crawler/
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上 JS 渲染 / 反爬挑战，纯 `axios` 可能取不到完整 HTML——届时需引入带浏览器指纹的抓取方式。
+- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,demo` 在多站点模式下占位站点 warn 跳过。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

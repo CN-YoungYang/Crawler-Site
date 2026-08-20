@@ -1,5 +1,8 @@
 module.exports = {
   name: 'yfbzb',
+  displayName: '乙方宝·湖北',
+  description: '湖北省招标公告与邀请招标数据',
+  originUrl: 'https://www.yfbzb.com',
   baseUrl: 'https://www.yfbzb.com/search/invitedBidSearch?type=0&defaultSearch=false&keyword=&pageNo=',
   urlSuffix: '&pageSize=30&provinceId=12&noticeType=3&invitedBidType=3&timeType=1&searchMode=1',
   linkPrefix: 'https://www.yfbzb.com',

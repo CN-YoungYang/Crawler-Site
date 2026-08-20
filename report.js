@@ -21,8 +21,50 @@ function indexHtmlPath(site) {
 function tokensCssPath(site) {
   return path.join(fileDir(site), 'tokens.css');
 }
+function navHtmlPath() {
+  return path.join('file', 'index.html');
+}
+function navTokensCssPath() {
+  return path.join('file', 'tokens.css');
+}
 function defaultSite() {
   return normalizeSite(process.env.SITE || 'yfbzb');
+}
+
+// 站点展示元信息：优先取站点配置中的 displayName/description/originUrl，否则回退
+function siteMeta(site) {
+  const key = normalizeSite(site);
+  try {
+    const cfg = require('./sites').getSiteConfig(key);
+    return {
+      key,
+      displayName: cfg.displayName || cfg.name || key,
+      description: cfg.description || '',
+      originUrl: cfg.originUrl || cfg.baseUrl || '',
+      // 供卡片副标题
+      subtitle: cfg.description || (cfg.baseUrl ? new URL(cfg.baseUrl).hostname : key),
+    };
+  } catch (_) {
+    return { key, displayName: key, description: '', originUrl: '', subtitle: key };
+  }
+}
+
+function collectSiteStats(site) {
+  const key = normalizeSite(site);
+  const files = scanFiles(key);
+  const totalDates = files.length;
+  const totalRecords = files.reduce((n, f) => n + f.rows.length, 0);
+  const latestUpdate = totalDates ? files[0].date : '-';
+  // 文件系统 mtime 作为“最后更新”兜底
+  let mtimeLabel = '-';
+  try {
+    const dir = fileDir(key);
+    if (fs.existsSync(dir)) {
+      const stat = fs.statSync(path.join(dir, files[0]?.fileName || ''));
+      if (stat && stat.mtime) mtimeLabel = stat.mtime.toLocaleString('zh-CN', { hour12: false });
+    }
+  } catch (_) {}
+  return { site: key, files, totalDates, totalRecords, latestUpdate, mtimeLabel, meta: siteMeta(key) };
 }
 
 function getReportWindow(now = new Date()) {
@@ -431,6 +473,182 @@ const COMMON_CSS = `
   }
 `;
 
+const NAV_CSS = `
+  .site-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-lg);
+    margin-bottom: var(--space-xl);
+  }
+  .site-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    padding: var(--space-lg);
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease;
+  }
+  .site-card:hover {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+    transform: translateY(-2px);
+  }
+  .site-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .site-card:active { transform: translateY(0) scale(0.99); }
+  .site-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-sm);
+  }
+  .site-card-title {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .site-card-key {
+    display: inline-flex;
+    padding: 0.125rem 0.5rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--fg-muted);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .site-card-desc {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  .site-card-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+  }
+  .site-card-stats strong { color: var(--fg); font-size: 0.875rem; }
+  .site-card-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: auto;
+    padding-top: var(--space-sm);
+  }
+  .site-card-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.45rem 0.9rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background 180ms ease, transform 180ms ease;
+  }
+  .site-card-cta:hover { background: var(--accent-hover); text-decoration: none; }
+  .site-card-cta:active { transform: scale(0.97); }
+  .site-card-origin {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--fg-muted);
+    font-size: 0.8125rem;
+    text-decoration: none;
+  }
+  .site-card-origin:hover { color: var(--accent); text-decoration: none; }
+  .site-card-stats-empty { color: var(--fg-muted); font-size: 0.8125rem; }
+  @media (max-width: 640px) {
+    .site-grid { grid-template-columns: 1fr; }
+  }
+  @media (prefers-color-scheme: dark) {
+    .site-card-cta { color: #fff; }
+  }
+`;
+
+function buildNavHtml(sitesData) {
+  const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false });
+  const totalSites = sitesData.length;
+  const totalRecords = sitesData.reduce((n, s) => n + s.totalRecords, 0);
+  const totalDates = sitesData.reduce((n, s) => n + s.totalDates, 0);
+
+  const cardsHtml = sitesData.map(s => {
+    const hasData = s.totalDates > 0;
+    const statsHtml = hasData
+      ? `<div class="site-card-stats"><span>总计 <strong>${s.totalDates.toLocaleString('zh-CN')}</strong> 天</span><span>共 <strong>${s.totalRecords.toLocaleString('zh-CN')}</strong> 条</span><span>最近 <strong class="cell-mono">${s.latestUpdate}</strong></span></div>`
+      : `<div class="site-card-stats"><span class="site-card-stats-empty">暂无数据 · 完成首次爬取后显示</span></div>`;
+    const originLink = s.meta.originUrl
+      ? `<a class="site-card-origin" href="${s.meta.originUrl}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">↗ 原站</a>`
+      : '';
+    const href = `${encodeURIComponent(s.site)}/index.html`;
+    return `<a class="site-card" href="${href}" aria-label="${s.meta.displayName}">
+      <div class="site-card-header">
+        <h2 class="site-card-title">${s.meta.displayName}</h2>
+        <span class="site-card-key">${s.site}</span>
+      </div>
+      <p class="site-card-desc">${s.meta.description || s.meta.subtitle || ''}</p>
+      ${statsHtml}
+      <div class="site-card-actions">
+        <span class="site-card-cta">查看报告 →</span>
+        ${originLink}
+      </div>
+    </a>`;
+  }).join('\n');
+
+  const emptyHtml = totalSites === 0
+    ? `<div class="empty-state"><strong>暂无可用站点</strong><p>请检查 SITES 配置与 sites/ 注册表。</p></div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>招标数据导航</title>
+<link rel="stylesheet" href="tokens.css">
+<style>${COMMON_CSS}${NAV_CSS}</style>
+</head>
+<body>
+<div class="container">
+  <header class="header">
+    <h1 class="page-title">招标数据导航</h1>
+    <p class="page-meta">生成于 ${generatedAt} · 共 ${totalSites} 个站点 · ${totalDates.toLocaleString('zh-CN')} 个日期 · ${totalRecords.toLocaleString('zh-CN')} 条记录</p>
+  </header>
+
+  <div class="stats-grid">
+    <div class="stat-item"><span class="stat-label">站点数</span><span class="stat-value">${totalSites.toLocaleString('zh-CN')}</span></div>
+    <div class="stat-item"><span class="stat-label">总计日期</span><span class="stat-value">${totalDates.toLocaleString('zh-CN')}</span></div>
+    <div class="stat-item"><span class="stat-label">总计记录</span><span class="stat-value">${totalRecords.toLocaleString('zh-CN')}</span></div>
+    <div class="stat-item"><span class="stat-label">生成时间</span><span class="stat-value stat-value-small cell-mono">${generatedAt}</span></div>
+  </div>
+
+  <main>
+    <div class="filter-header">
+      <h2 class="section-title">全部站点</h2>
+      <span class="filter-status">点击卡片进入对应报告</span>
+    </div>
+    ${totalSites ? `<div class="site-grid">${cardsHtml}</div>` : emptyHtml}
+  </main>
+</div>
+</body>
+</html>`;
+}
+
 function buildIndexHtml(files) {
   const totalDates = files.length;
   const totalRecords = files.reduce((n, f) => n + f.rows.length, 0);
@@ -800,6 +1018,58 @@ async function generateReport(site) {
   log(`已生成报告 [${siteName}]：索引 ${indexHtmlPath(siteName)} + ${files.length} 个明细页（${files.reduce((n, f) => n + f.rows.length, 0)} 条记录）`, { event: 'report_generated', context: { site: siteName, files: files.length, records: files.reduce((n, f) => n + f.rows.length, 0) }, site: siteName });
 }
 
+async function generateNav(sites) {
+  let targets;
+  if (sites && sites.length) {
+    targets = sites.map(normalizeSite);
+  } else {
+    // 无显式列表时，优先尊重 SITES 环境变量，否则回退到已启用站点（排除示例站点 demo）
+    try {
+      const { parseSitesList } = require('./sites');
+      const envSites = parseSitesList();
+      targets = envSites.length ? envSites : require('./sites').listEnabledSites().filter(s => s !== 'demo');
+    } catch (_) {
+      targets = require('./sites').listEnabledSites().filter(s => s !== 'demo');
+    }
+  }
+  const { getSiteConfig } = require('./sites');
+  const valid = [];
+  for (const s of targets) {
+    if (s === 'demo') continue;
+    try { getSiteConfig(s); valid.push(s); } catch { /* 跳过未实现站点 */ }
+  }
+  // yfbzb/ceb 置顶，其余按字母序
+  const pinned = ['yfbzb', 'ceb'];
+  valid.sort((a, b) => {
+    const ai = pinned.indexOf(a), bi = pinned.indexOf(b);
+    if (ai !== -1 || bi !== -1) {
+      if (ai !== -1 && bi !== -1) return ai - bi;
+      return ai !== -1 ? -1 : 1;
+    }
+    return a.localeCompare(b);
+  });
+  const sitesData = valid.map(collectSiteStats);
+  // 确保各站点的报告索引存在（首次部署时 file/<site>/ 可能为空，避免导航卡片 404）
+  for (const s of sitesData) {
+    const idxPath = indexHtmlPath(s.site);
+    const dir = fileDir(s.site);
+    if (!fs.existsSync(idxPath)) {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      await fsp.writeFile(idxPath, buildIndexHtml(s.files), 'utf8');
+      await fsp.writeFile(tokensCssPath(s.site), TOKENS_CSS, 'utf8');
+    }
+  }
+  const html = buildNavHtml(sitesData);
+  const fileRoot = path.join(process.cwd(), 'file');
+  if (!fs.existsSync(fileRoot)) fs.mkdirSync(fileRoot, { recursive: true });
+  await Promise.all([
+    fsp.writeFile(navHtmlPath(), html, 'utf8'),
+    fsp.writeFile(navTokensCssPath(), TOKENS_CSS, 'utf8'),
+  ]);
+  log(`已生成导航页：${navHtmlPath()}（${valid.length} 个站点）`, { event: 'nav_generated', context: { sites: valid.join(','), count: valid.length } });
+  return { sitesData, html };
+}
+
 async function generateAllReports(sites) {
   const targets = sites && sites.length ? sites.map(normalizeSite) : listSites().filter(s => {
     try { require('./sites')[s] || require(`./sites/${s}`); return true; } catch { return false; }
@@ -811,6 +1081,12 @@ async function generateAllReports(sites) {
     try { getSiteConfig(s); valid.push(s); } catch { /* 跳过未实现站点 */ }
   }
   await Promise.all(valid.map(s => generateReport(s)));
+  // 同步生成总导航
+  try {
+    await generateNav(valid);
+  } catch (e) {
+    log(`生成导航页失败: ${e.message}`, { level: 'error', event: 'nav_failed', context: { error: e.message } });
+  }
 }
 
-module.exports = { generateReport, generateAllReports, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir };
+module.exports = { generateReport, generateAllReports, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS };

@@ -10,6 +10,10 @@ services:
       # 未在 .env 中设置时兜底，多站点并发（yfbzb 湖北乙方宝 + ceb 中国招标公共服务平台湖北）
       - SITES=${SITES:-yfbzb,ceb}
       - TZ=${TZ:-Asia/Shanghai}
+      - HTTP_PORT=${HTTP_PORT:-8080}
+      - HTTP_ENABLED=${HTTP_ENABLED:-true}
+    ports:
+      - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
     volumes:
       - ./file:/app/file
       - ./logs:/app/logs
@@ -18,6 +22,12 @@ services:
       # - ./state-ceb.json:/app/state-ceb.json
       # - ./state-site2.json:/app/state-site2.json
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
     # 1C1G / 低配机优化（参考 rust-migration）
     mem_limit: 300m

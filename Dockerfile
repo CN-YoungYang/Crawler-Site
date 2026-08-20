@@ -16,6 +16,8 @@ COPY . .
 
 RUN chown -R node:node /app && mkdir -p /app/file /app/logs
 
+EXPOSE 8080
+
 USER node
 
 ENTRYPOINT ["node", "index.js"]

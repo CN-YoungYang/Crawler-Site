@@ -1,6 +1,7 @@
 const { crawl, isStopping } = require('./crawler');
-const { generateReport } = require('./report');
+const { generateReport, generateNav } = require('./report');
 const { log } = require('./log');
+const { startServer } = require('./server');
 const { getSiteConfig, normalizeSite, normalizeSites, parseSitesList } = require('./sites');
 
 function parseArguments() {
@@ -185,6 +186,11 @@ async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDe
     } catch (error) {
       log(`生成 HTML 报告失败: ${error.message}`, { level: 'error', event: 'report_failed', context: { site: siteNorm, error: error.message }, site: siteNorm });
     }
+    try {
+      await generateNav();
+    } catch (error) {
+      log(`刷新导航页失败: ${error.message}`, { level: 'error', event: 'nav_failed', context: { site: siteNorm, error: error.message }, site: siteNorm });
+    }
   }
 
   // 单次模式由外层统一 keepalive，此处仅跑一次即可
@@ -283,6 +289,20 @@ function sleepInterruptible(ms) {
 if (require.main === module) {
   const env = parseEnv();
   validateInput(env);
+  // 启动静态文件服务（托管 file/，根路径为总导航）
+  const httpServer = startServer();
+  // 尽力预生成导航页，使域名访问立即可用（不阻塞爬取调度）
+  generateNav(env.sites).catch(e => {
+    log(`预生成导航页失败: ${e.message}`, { level: 'warn', event: 'nav_pre_failed', context: { error: e.message } });
+  });
+  // 优雅关闭：随爬虫 stopping 一并关闭 HTTP 服务
+  if (httpServer) {
+    const closeHttp = () => {
+      try { httpServer.close(); } catch (_) {}
+    };
+    process.on('SIGINT', closeHttp);
+    process.on('SIGTERM', closeHttp);
+  }
   scheduleLoop(env);
 }
 
