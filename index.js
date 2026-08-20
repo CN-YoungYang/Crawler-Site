@@ -275,18 +275,13 @@ async function scheduleLoop(input) {
   process.exit(0);
 }
 
-function sleepInterruptible(ms) {
-  return new Promise(resolve => {
-    const start = Date.now();
-    const checkInterval = 1000;
-    function tick() {
-      if (isStopping()) return resolve(false);
-      const elapsed = Date.now() - start;
-      if (elapsed >= ms) return resolve(true);
-      setTimeout(tick, Math.min(checkInterval, ms - elapsed));
-    }
-    setTimeout(tick, Math.min(checkInterval, ms));
-  });
+async function sleepInterruptible(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (isStopping()) return false;
+    await new Promise(r => setTimeout(r, Math.min(1000, end - Date.now())));
+  }
+  return !isStopping();
 }
 
 if (require.main === module) {

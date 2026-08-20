@@ -3,10 +3,7 @@
 // 风控敏感：VAPTCHA 已在当前页面注释但仍有 JSESSIONID/acw_tc，禁止并发，必须串行+抖动
 
 function formatDate(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function searchDateForDates(dates) {
