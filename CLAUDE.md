@@ -74,14 +74,14 @@ Site-aware (index + crawler + log + report + sites registry), data flow is linea
 ## Repository Documentation
 
 - `AGENTS.md` is the contributor guide and should stay aligned with this file.
-- Issue notes, when applicable, live under `.scratch/<feature>/`; see `docs/agents/issue-tracker.md`.
+- Issues live in GitHub Issues; see `docs/agents/issue-tracker.md`.
 - Domain and architecture context is documented in `docs/agents/domain.md`.
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live as local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues (CN-YoungYang/Crawler-Site). See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
