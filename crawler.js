@@ -82,8 +82,22 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
 
   let retries = 0;
 
+  // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
+  async function maybeThrottle() {
+    const d = siteConfig.requestDelay;
+    if (!d) return;
+    const min = Number(d.min ?? d.minMs ?? 0);
+    const max = Number(d.max ?? d.maxMs ?? min);
+    if (!(max > 0)) return;
+    const lo = Math.min(min, max);
+    const hi = Math.max(min, max);
+    const delay = Math.floor(Math.random() * (hi - lo + 1) + lo);
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+  }
+
   while (retries < maxRetries) {
     try {
+      await maybeThrottle();
       const response = await axios.get(url, { timeout, headers });
 
       // 优先使用站点自定义 parse 接管整页解析

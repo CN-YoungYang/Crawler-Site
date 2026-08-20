@@ -1,0 +1,153 @@
+// 中国招标投标公共服务平台 - 湖北（ceb）
+// 列表页: https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html
+// 风控敏感：VAPTCHA 已在当前页面注释但仍有 JSESSIONID/acw_tc，禁止并发，必须串行+抖动
+
+function formatDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function searchDateForDates(dates) {
+  const d = new Date();
+  if (dates === 300) {
+    d.setFullYear(d.getFullYear() - 25);
+  } else if (dates === 30 || dates === 90) {
+    d.setMonth(d.getMonth() - Math.floor(dates / 30));
+  } else if ([0, 2, 3, 7].includes(dates)) {
+    d.setDate(d.getDate() - dates);
+  }
+  return formatDate(d);
+}
+
+function extractId(link) {
+  if (!link) return '';
+  const s = String(link);
+  // javascript:urlOpen('hex32')
+  const m = s.match(/urlOpen\('([^']+)'\)/);
+  if (m) return m[1];
+  // 已拼好的 detail 链接 ?uuid=hex
+  try {
+    const u = new URL(s, 'https://ctbpsp.com');
+    const uuid = u.searchParams.get('uuid');
+    if (uuid) return uuid;
+  } catch (_) {}
+  return s.split('/').pop().split('.')[0].split('?')[0].split('#')[0];
+}
+
+function isBoundary(error) {
+  if (!error || !error.response) return false;
+  const status = error.response.status;
+  // 429 限频应重试而非判为边界；仅 403 视为数据边界
+  if (status === 429) return false;
+  return status === 403;
+}
+
+function buildUrl(pageNo) {
+  const dates = this.dates ?? 300;
+  const categoryId = this.categoryId ?? '88';
+  const area = this.area ?? '420000';
+  const page = Math.max(1, parseInt(pageNo, 10) || 1);
+
+  const searchDate = searchDateForDates(dates);
+
+  // 窗口：昨日 00:00:00 ~ 今日 23:59:59，与 yfbzb 的今/昨天去重语义一致
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  const startcheckDate = formatDate(yesterday);
+  const endcheckDate = `${formatDate(today)} 23:59:59`;
+
+  const base = 'https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html';
+  const params = [
+    `searchDate=${searchDate}`,
+    `dates=${dates}`,
+    `categoryId=${categoryId}`,
+    `industryName=`,
+    `area=${area}`,
+    `status=`,
+    `publishMedia=`,
+    `sourceInfo=`,
+    `showStatus=0`,
+    `word=`,
+    `startcheckDate=${startcheckDate}`,
+    `endcheckDate=${encodeURIComponent(endcheckDate)}`,
+    `page=${page}`
+  ].join('&');
+
+  return `${base}?${params}`;
+}
+
+async function parse($, html, existingIds, siteConfig) {
+  const seen = existingIds instanceof Set ? existingIds : new Set();
+  // 表头在第一行 th，数据行含 td[name="imgShow"] 或 javascript:urlOpen
+  const rows = $('table.table_text tr').filter((_, el) => $(el).find('td').length > 0);
+  if (rows.length === 0) return [];
+
+  const pageData = [];
+  rows.each((_, el) => {
+    const $row = $(el);
+    const $a = $row.find('td[name="imgShow"] a').first();
+    const href = $a.attr('href') || '';
+    // 兼容历史快照：部分行可能是无效展开行，无 a
+    if (!href) return;
+    const id = extractId(href);
+    if (!id) return;
+    if (seen.has(id)) return;
+
+    const title = ($a.attr('title') || $a.text() || '').trim();
+    if (!title) return;
+
+    const tds = $row.find('td');
+    // 列：0 标题 | 1 行业 | 2 地区 | 3 发布媒介 | 4 发布时间 | 5 距离开标
+    const industry = tds.eq(1).text().trim();
+    const area = tds.eq(2).text().trim().replace(/【|】/g, '');
+    const publishTimeRaw = tds.eq(4).text().trim();
+    // 发布时间形如 2026-08-20，已为 YYYY-MM-DD，可直接作分区键
+    const publishTime = publishTimeRaw.replace(/\//g, '-');
+
+    const link = `https://ctbpsp.com/#/bulletinDetail?uuid=${id}&inpvalue=&dataSource=0&tenderAgency=`;
+
+    pageData.push({
+      id,
+      title,
+      link,
+      noticeType: industry,
+      area,
+      publishTime
+    });
+  });
+
+  return pageData;
+}
+
+module.exports = {
+  name: 'ceb',
+  baseUrl: 'https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html',
+  // 供 buildUrl 使用的可覆盖项
+  dates: 300,
+  categoryId: '88',
+  area: '420000',
+  // 风控：串行 + 批次间已有 INTERVAL_MS，再叠加页内抖动
+  batchSize: 1,
+  failureThreshold: 2,
+  timeout: 30000,
+  // 发请求前随机抖动（crawler.js 识别此字段）
+  requestDelay: { min: 2500, max: 5500 },
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    'Referer': 'https://bulletin.cebpubservice.com/',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'iframe',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin'
+  },
+  buildUrl,
+  extractId,
+  isBoundary,
+  parse
+};

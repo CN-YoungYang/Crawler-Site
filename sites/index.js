@@ -1,8 +1,9 @@
 const yfbzb = require('./yfbzb');
+const ceb = require('./ceb');
 const site2 = require('./site2');
 const demo = require('./demo');
 
-const registry = { yfbzb, site2, demo };
+const registry = { yfbzb, ceb, site2, demo };
 
 function normalizeSite(site) {
   return (site || process.env.SITE || 'yfbzb').toLowerCase();
@@ -27,7 +28,7 @@ function getSiteConfig(site) {
   const key = normalizeSite(site);
   const cfg = registry[key];
   if (!cfg) throw new Error(`未知站点 SITE=${site}，可选: ${Object.keys(registry).join(', ')}`);
-  if (!cfg.baseUrl) throw new Error(`站点 ${key} 未实现：${cfg.disabledReason || 'baseUrl 为空'}`);
+  if (!cfg.baseUrl && typeof cfg.buildUrl !== 'function') throw new Error(`站点 ${key} 未实现：${cfg.disabledReason || 'baseUrl 为空'}`);
   return cfg;
 }
 

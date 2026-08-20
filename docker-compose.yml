@@ -5,7 +5,7 @@ services:
     container_name: crawler
     environment:
       # 多站点：逗号分隔，容器内并发爬取，每站独立定时与逻辑
-      SITES: yfbzb
+      SITES: yfbzb,ceb
       # 兼容单站点旧变量
       # SITE: yfbzb
       TOTAL_PAGES: "100"
@@ -15,16 +15,20 @@ services:
       CRON_EXPR: "0 2 * * *"
       # 每站独立覆盖（可选，优先级高于全局）：
       # CRON_YFBZB: "0 2 * * *"
-      # CRON_SITE2: "0 3 * * *"
+      # CRON_CEB: "0 3 * * *"
+      # TOTAL_PAGES_CEB: "30"
+      # INTERVAL_MS_CEB: "8000"  # ceb 串行+抖动，建议 8000-12000
+      # CRON_SITE2: "0 3 * * *" # 占位站点
       # TOTAL_PAGES_SITE2: "50"
       # INTERVAL_MS_SITE2: "3000"
       # 或 JSON 方式：
-      # SITES_CONFIG: '{"yfbzb":{"totalPages":100,"cron":"0 2 * * *"},"site2":{"totalPages":50,"cron":"0 3 * * *"}}'
+      # SITES_CONFIG: '{"yfbzb":{"totalPages":100,"cron":"0 2 * * *"},"ceb":{"totalPages":30,"cron":"0 3 * * *"}}'
       TZ: Asia/Shanghai
     volumes:
       - ./file:/app/file
       - ./logs:/app/logs
       # 崩溃续跑：如需保留 checkpoint，按站点分别挂载
       # - ./state-yfbzb.json:/app/state-yfbzb.json
+      # - ./state-ceb.json:/app/state-ceb.json
       # - ./state-site2.json:/app/state-site2.json
     restart: unless-stopped
