@@ -6,23 +6,13 @@ const path = require('path');
 
 const RETENTION_DAYS = 30;
 
-let currentSite = (process.env.SITE || process.env.SITES || 'yfbzb').split(',')[0].trim().toLowerCase() || 'yfbzb';
-
-function getSite() {
-  return currentSite;
-}
-
-function setSite(site) {
-  if (site) currentSite = String(site).toLowerCase();
-}
-
 function normalizeSite(site) {
-  return String(site || currentSite || 'yfbzb').toLowerCase();
+  return String(site || 'yfbzb').toLowerCase();
 }
 
 // 日志目录相对 cwd（与 file/ 输出同源），每次调用时解析，保证 withTempCwd 测试隔离
 // 与定时任务从项目根运行一致。不在模块加载时冻结，避免 cwd 变更后路径失效。
-// 按站点隔离：logs/<site>/，一容器多站点（并发）时靠显式 site 参数隔离，避免 currentSite 全局竞态。
+// 按站点隔离：logs/<site>/，一容器多站点并发时靠显式 site 参数隔离。
 function logDir(site) {
   return path.join(process.cwd(), 'logs', normalizeSite(site));
 }
@@ -68,8 +58,7 @@ function pruneOldLogs(site) {
 }
 
 // 主入口：同时写控制台 + JSONL。
-// level: 'info' | 'warn' | 'error'；event: 结构化事件名；context: 可选附加字段；site: 可选站点覆写。
-// 多站点并发时务必显式传 site，避免依赖全局 currentSite（setSite 在并发下会竞态）。
+// level: 'info' | 'warn' | 'error'；event: 结构化事件名；context: 可选附加字段；site: 站点标识（多站并发时必须显式传递）。
 function log(message, { level = 'info', event = 'log', context, site } = {}) {
   const ts = new Date().toISOString();
   const pid = process.pid;
@@ -78,4 +67,4 @@ function log(message, { level = 'info', event = 'log', context, site } = {}) {
   appendJsonl(jsonlLine(ts, level, event, message, context, effectiveSite), effectiveSite);
 }
 
-module.exports = { log, pruneOldLogs, RETENTION_DAYS, setSite, getSite, logDir };
+module.exports = { log, pruneOldLogs, RETENTION_DAYS, logDir, normalizeSite };

@@ -1,9 +1,7 @@
 const yfbzb = require('./yfbzb');
 const ceb = require('./ceb');
-const site2 = require('./site2');
-const demo = require('./demo');
 
-const registry = { yfbzb, ceb, site2, demo };
+const registry = { yfbzb, ceb };
 
 function normalizeSite(site) {
   return (site || process.env.SITE || 'yfbzb').toLowerCase();
@@ -32,28 +30,8 @@ function getSiteConfig(site) {
   return cfg;
 }
 
-function getSiteConfigs(sites) {
-  const list = Array.isArray(sites) ? sites : parseSitesList(sites);
-  const valid = [];
-  const errors = [];
-  for (const s of list) {
-    try {
-      valid.push(getSiteConfig(s));
-    } catch (e) {
-      errors.push(e.message);
-    }
-  }
-  return { valid, errors, list };
-}
-
-function listSites() {
+function listEnabledSites() {
   return Object.keys(registry);
 }
 
-function listEnabledSites() {
-  return listSites().filter(s => {
-    try { getSiteConfig(s); return true; } catch { return false; }
-  });
-}
-
-module.exports = { getSiteConfig, getSiteConfigs, listSites, listEnabledSites, registry, normalizeSite, normalizeSites, parseSitesList };
+module.exports = { getSiteConfig, listEnabledSites, registry, normalizeSite, parseSitesList };

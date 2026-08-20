@@ -8,7 +8,7 @@ const fsp = fs.promises;
 const path = require('path');
 const xlsx = require('xlsx');
 const { log, pruneOldLogs } = require('./log');
-const { normalizeSite, listSites } = require('./sites');
+const { normalizeSite } = require('./sites');
 
 const RETENTION_DAYS = 30;
 
@@ -1222,19 +1222,17 @@ async function generateNav(sites) {
   if (sites && sites.length) {
     targets = sites.map(normalizeSite);
   } else {
-    // 无显式列表时，优先尊重 SITES 环境变量，否则回退到已启用站点（排除示例站点 demo）
     try {
       const { parseSitesList } = require('./sites');
       const envSites = parseSitesList();
-      targets = envSites.length ? envSites : require('./sites').listEnabledSites().filter(s => s !== 'demo');
+      targets = envSites.length ? envSites : require('./sites').listEnabledSites();
     } catch (_) {
-      targets = require('./sites').listEnabledSites().filter(s => s !== 'demo');
+      targets = require('./sites').listEnabledSites();
     }
   }
   const { getSiteConfig } = require('./sites');
   const valid = [];
   for (const s of targets) {
-    if (s === 'demo') continue;
     try { getSiteConfig(s); valid.push(s); } catch { /* 跳过未实现站点 */ }
   }
   // yfbzb/ceb 置顶，其余按字母序
@@ -1269,23 +1267,4 @@ async function generateNav(sites) {
   return { sitesData, html };
 }
 
-async function generateAllReports(sites) {
-  const targets = sites && sites.length ? sites.map(normalizeSite) : listSites().filter(s => {
-    try { require('./sites')[s] || require(`./sites/${s}`); return true; } catch { return false; }
-  });
-  // 仅对已实现的站点生成报告
-  const { getSiteConfig } = require('./sites');
-  const valid = [];
-  for (const s of targets) {
-    try { getSiteConfig(s); valid.push(s); } catch { /* 跳过未实现站点 */ }
-  }
-  await Promise.all(valid.map(s => generateReport(s)));
-  // 同步生成总导航
-  try {
-    await generateNav(valid);
-  } catch (e) {
-    log(`生成导航页失败: ${e.message}`, { level: 'error', event: 'nav_failed', context: { error: e.message } });
-  }
-}
-
-module.exports = { generateReport, generateAllReports, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS };
+module.exports = { generateReport, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS };

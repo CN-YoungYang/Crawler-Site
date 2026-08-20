@@ -19,6 +19,42 @@ const BACKOFF_CAP_MS = 60000;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
+function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
+  return new Date(nowMs + 8 * 3600000 + offsetDays * 86400000).toISOString().slice(0, 10);
+}
+
+// xlsx 魔数校验（zip PK\x03\x04），抽公用避免三处重复
+function hasValidXlsxHeader(filePath) {
+  let fd;
+  try {
+    const head = Buffer.alloc(4);
+    fd = fs.openSync(filePath, 'r');
+    const bytesRead = fs.readSync(fd, head, 0, 4, 0);
+    return bytesRead >= 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+  } catch (_) {
+    return false;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
+  }
+}
+
+function readXlsxRowsSafe(filePath, site, event = 'recent_read_failed') {
+  if (!hasValidXlsxHeader(filePath)) {
+    log(`读取 ${filePath} 失败，已跳过：非 xlsx`, { level: 'warn', event, context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
+    return null;
+  }
+  try {
+    const workbook = xlsx.readFile(filePath);
+    const sheetName = workbook.SheetNames && workbook.SheetNames[0];
+    if (!sheetName || !workbook.Sheets[sheetName]) return [];
+    return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+  } catch (e) {
+    log(`读取 ${filePath} 失败，已跳过：${e.message}`, { level: 'warn', event, context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
+    return null;
+  }
+}
+
 // 站点化路径（cwd 相对，与 withTempCwd 测试隔离一致）
 function fileDir(site) {
   return path.join('file', normalizeSite(site));
@@ -174,12 +210,6 @@ function loadCheckpoint(site) {
 }
 
 function saveCheckpoint(site, currentPage, existingIds) {
-  // 兼容旧调用 saveCheckpoint(currentPage, existingIds) —— 此时 site 为数字
-  if (typeof site === 'number') {
-    existingIds = currentPage;
-    currentPage = site;
-    site = undefined;
-  }
   const file = stateFile(site);
   const state = { currentPage, existingIds: Array.from(existingIds) };
   fs.writeFileSync(file, JSON.stringify(state), 'utf8');
@@ -331,42 +361,15 @@ async function crawl(a, b, c, d) {
 
       let existingFileData = [];
       if (fs.existsSync(fileName)) {
-        let fd;
-        let isCorrupt = false;
-        let headOk = false;
-        try {
-          const head = Buffer.alloc(4);
-          fd = fs.openSync(fileName, 'r');
-          const bytesRead = fs.readSync(fd, head, 0, 4, 0);
-          if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) throw new Error('非 xlsx');
-          headOk = true;
-        } catch (e) {
-          isCorrupt = true;
-          log(`合并读取 ${fileName} 失败，已按空文件处理：${e.message}`, { level: 'warn', event: 'merge_read_failed', context: { file: fileName, site }, site });
-        } finally {
-          if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
-        }
-        if (headOk && !isCorrupt) {
-          try {
-            const workbook = xlsx.readFile(fileName);
-            const sheetName = workbook.SheetNames && workbook.SheetNames[0];
-            if (!sheetName || !workbook.Sheets[sheetName]) {
-              existingFileData = [];
-            } else {
-              existingFileData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-            }
-          } catch (e) {
-            isCorrupt = true;
-            log(`合并读取 ${fileName} 失败，已按空文件处理：${e.message}`, { level: 'warn', event: 'merge_read_failed', context: { file: fileName, site }, site });
-            existingFileData = [];
-          }
-        }
-        if (isCorrupt) {
+        const rows = readXlsxRowsSafe(fileName, site, 'merge_read_failed');
+        if (rows === null) {
           try {
             const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
             fs.renameSync(fileName, bak);
             log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
           } catch (_) {}
+        } else {
+          existingFileData = rows;
         }
       }
 
@@ -398,36 +401,16 @@ function readRecentIds(site) {
   const dir = fileDir(site);
 
   if (fs.existsSync(dir)) {
-    // 显式按 Asia/Shanghai（UTC+8，无夏令时），避免 small-icu 下 toLocaleDateString 回退；同次采样 nowMs 避免跨午夜竞态
     const nowMs = Date.now();
-    const today = new Date(nowMs + 8 * 3600000).toISOString().slice(0, 10);
-    const yesterday = new Date(nowMs + 8 * 3600000 - 86400000).toISOString().slice(0, 10);
+    const today = shanghaiDateStr(0, nowMs);
+    const yesterday = shanghaiDateStr(-1, nowMs);
     for (const name of [`${today}.xlsx`, `${yesterday}.xlsx`]) {
       const filePath = path.join(dir, name);
       if (!fs.existsSync(filePath)) continue;
-      let fd;
-      let headOk = false;
-      try {
-        const head = Buffer.alloc(4);
-        fd = fs.openSync(filePath, 'r');
-        const bytesRead = fs.readSync(fd, head, 0, 4, 0);
-        if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) throw new Error('非 xlsx');
-        headOk = true;
-      } catch (e) {
-        log(`读取 ${filePath} 失败，已跳过：${e.message}`, { level: 'warn', event: 'recent_read_failed', context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
-      } finally {
-        if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
-      }
-      if (!headOk) continue;
-      try {
-        const workbook = xlsx.readFile(filePath);
-        const sheetName = workbook.SheetNames && workbook.SheetNames[0];
-        if (!sheetName || !workbook.Sheets[sheetName]) continue;
-        for (const row of xlsx.utils.sheet_to_json(workbook.Sheets[sheetName])) {
-          if (row.id) ids.add(row.id);
-        }
-      } catch (e) {
-        log(`读取 ${filePath} 失败，已跳过：${e.message}`, { level: 'warn', event: 'recent_read_failed', context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
+      const rows = readXlsxRowsSafe(filePath, site);
+      if (!rows) continue;
+      for (const row of rows) {
+        if (row.id) ids.add(row.id);
       }
     }
   }

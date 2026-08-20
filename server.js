@@ -86,14 +86,12 @@ function buildHealthPayload() {
     let targets;
     try {
       const envSites = sitesMod.parseSitesList();
-      targets = envSites.length ? envSites : sitesMod.listEnabledSites().filter(s => s !== 'demo');
+      targets = envSites.length ? envSites : sitesMod.listEnabledSites();
     } catch (_) {
-      targets = sitesMod.listEnabledSites().filter(s => s !== 'demo');
+      targets = sitesMod.listEnabledSites();
     }
-    // 过滤未实现站点
     const valid = [];
     for (const s of targets) {
-      if (s === 'demo') continue;
       try { sitesMod.getSiteConfig(s); valid.push(s); } catch (_) {}
     }
     sites = valid.map(site => {
