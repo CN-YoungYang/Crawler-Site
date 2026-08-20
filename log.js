@@ -41,7 +41,7 @@ function jsonlLine(ts, level, event, message, context, site) {
 }
 
 function todayStamp(d = new Date()) {
-  return d.toISOString().slice(0, 10);
+  return new Date(d.getTime() + 8 * 3600000).toISOString().slice(0, 10);
 }
 
 // 按日写 JSONL：首次写时建目录。文件名含日期，天然按日分割。
@@ -56,14 +56,12 @@ function appendJsonl(line, site) {
 function pruneOldLogs(site) {
   const dir = logDir(site);
   if (!fs.existsSync(dir)) return;
-  const cutoff = new Date();
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - (RETENTION_DAYS - 1));
+  const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  const cutoffStr = new Date(new Date(todayStr + 'T00:00:00Z').getTime() - (RETENTION_DAYS - 1) * 86400000).toISOString().slice(0, 10);
   for (const name of fs.readdirSync(dir)) {
     const m = /^crawler-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
     if (!m) continue;
-    const fileDate = new Date(m[1] + 'T00:00:00Z');
-    if (fileDate < cutoff) {
+    if (m[1] < cutoffStr) {
       fs.unlinkSync(path.join(dir, name));
     }
   }

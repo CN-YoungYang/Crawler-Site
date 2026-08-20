@@ -154,17 +154,20 @@ function nextCronDelay(cronExpr) {
   if (dom !== '*' || mon !== '*' || dow !== '*') {
     throw new Error('仅支持 "m h * * *"（后三段需为 *）');
   }
+  if (!/^\d+$/.test(minStr)) throw new Error(`分钟需 0-59，got "${minStr}"`);
+  if (!/^\d+$/.test(hourStr)) throw new Error(`小时需 0-23，got "${hourStr}"`);
   const minute = parseInt(minStr, 10);
   const hour = parseInt(hourStr, 10);
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) throw new Error(`分钟需 0-59，got "${minStr}"`);
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) throw new Error(`小时需 0-23，got "${hourStr}"`);
-  const now = new Date();
-  const next = new Date(now);
-  next.setSeconds(0, 0);
-  next.setMinutes(minute);
-  next.setHours(hour);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  return next - now;
+  const nowMs = Date.now();
+  const shanghaiNow = new Date(nowMs + 8 * 3600000);
+  const y = shanghaiNow.getUTCFullYear();
+  const mo = shanghaiNow.getUTCMonth();
+  const d = shanghaiNow.getUTCDate();
+  let nextMs = Date.UTC(y, mo, d, hour, minute, 0, 0) - 8 * 3600000;
+  if (nextMs < nowMs) nextMs += 86400000;
+  return nextMs - nowMs;
 }
 
 async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDelay, cronExpr }) {

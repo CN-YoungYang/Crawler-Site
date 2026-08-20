@@ -280,16 +280,21 @@ async function crawl(a, b, c, d) {
         continue;
       }
 
+      let pageNew = 0;
       if (pageData.length) {
-        hasNewDataInBatch = true;
+        let batchNew = 0;
         for (const item of pageData) {
+          if (existingIds.has(item.id)) continue;
           if (!allData[item.publishTime]) allData[item.publishTime] = [];
           allData[item.publishTime].push(item);
           existingIds.add(item.id);
           totalNew++;
+          batchNew++;
         }
+        if (batchNew) hasNewDataInBatch = true;
+        pageNew = batchNew;
       }
-      log(`第 ${pageNo} 页爬取完成，${pageData.length ? '有' : '没有'}新数据`, { event: 'page_done', context: { page: pageNo, newCount: pageData.length, site }, site });
+      log(`第 ${pageNo} 页爬取完成，${pageNew ? '有' : '没有'}新数据`, { event: 'page_done', context: { page: pageNo, newCount: pageNew, site }, site });
     }
 
     currentPage += pagesToCrawl;
@@ -326,8 +331,43 @@ async function crawl(a, b, c, d) {
 
       let existingFileData = [];
       if (fs.existsSync(fileName)) {
-        const workbook = xlsx.readFile(fileName);
-        existingFileData = xlsx.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+        let fd;
+        let isCorrupt = false;
+        let headOk = false;
+        try {
+          const head = Buffer.alloc(4);
+          fd = fs.openSync(fileName, 'r');
+          const bytesRead = fs.readSync(fd, head, 0, 4, 0);
+          if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) throw new Error('非 xlsx');
+          headOk = true;
+        } catch (e) {
+          isCorrupt = true;
+          log(`合并读取 ${fileName} 失败，已按空文件处理：${e.message}`, { level: 'warn', event: 'merge_read_failed', context: { file: fileName, site }, site });
+        } finally {
+          if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
+        }
+        if (headOk && !isCorrupt) {
+          try {
+            const workbook = xlsx.readFile(fileName);
+            const sheetName = workbook.SheetNames && workbook.SheetNames[0];
+            if (!sheetName || !workbook.Sheets[sheetName]) {
+              existingFileData = [];
+            } else {
+              existingFileData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+            }
+          } catch (e) {
+            isCorrupt = true;
+            log(`合并读取 ${fileName} 失败，已按空文件处理：${e.message}`, { level: 'warn', event: 'merge_read_failed', context: { file: fileName, site }, site });
+            existingFileData = [];
+          }
+        }
+        if (isCorrupt) {
+          try {
+            const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+            fs.renameSync(fileName, bak);
+            log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
+          } catch (_) {}
+        }
       }
 
       const newIds = new Set(data.map(item => item.id));
@@ -358,15 +398,36 @@ function readRecentIds(site) {
   const dir = fileDir(site);
 
   if (fs.existsSync(dir)) {
-    const today = new Date().toISOString().split('T')[0];
-    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    // 显式按 Asia/Shanghai（UTC+8，无夏令时），避免 small-icu 下 toLocaleDateString 回退；同次采样 nowMs 避免跨午夜竞态
+    const nowMs = Date.now();
+    const today = new Date(nowMs + 8 * 3600000).toISOString().slice(0, 10);
+    const yesterday = new Date(nowMs + 8 * 3600000 - 86400000).toISOString().slice(0, 10);
     for (const name of [`${today}.xlsx`, `${yesterday}.xlsx`]) {
       const filePath = path.join(dir, name);
-      if (fs.existsSync(filePath)) {
+      if (!fs.existsSync(filePath)) continue;
+      let fd;
+      let headOk = false;
+      try {
+        const head = Buffer.alloc(4);
+        fd = fs.openSync(filePath, 'r');
+        const bytesRead = fs.readSync(fd, head, 0, 4, 0);
+        if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) throw new Error('非 xlsx');
+        headOk = true;
+      } catch (e) {
+        log(`读取 ${filePath} 失败，已跳过：${e.message}`, { level: 'warn', event: 'recent_read_failed', context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
+      } finally {
+        if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
+      }
+      if (!headOk) continue;
+      try {
         const workbook = xlsx.readFile(filePath);
-        for (const row of xlsx.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]])) {
+        const sheetName = workbook.SheetNames && workbook.SheetNames[0];
+        if (!sheetName || !workbook.Sheets[sheetName]) continue;
+        for (const row of xlsx.utils.sheet_to_json(workbook.Sheets[sheetName])) {
           if (row.id) ids.add(row.id);
         }
+      } catch (e) {
+        log(`读取 ${filePath} 失败，已跳过：${e.message}`, { level: 'warn', event: 'recent_read_failed', context: { file: filePath, site: normalizeSite(site) }, site: normalizeSite(site) });
       }
     }
   }

@@ -58,9 +58,9 @@ function collectSiteStats(site) {
   // 文件系统 mtime 作为“最后更新”兜底
   let mtimeLabel = '-';
   try {
-    const dir = fileDir(key);
-    if (fs.existsSync(dir)) {
-      const stat = fs.statSync(path.join(dir, files[0]?.fileName || ''));
+    if (files[0]) {
+      const dir = fileDir(key);
+      const stat = fs.statSync(path.join(dir, files[0].fileName));
       if (stat && stat.mtime) mtimeLabel = stat.mtime.toLocaleString('zh-CN', { hour12: false });
     }
   } catch (_) {}
@@ -68,22 +68,25 @@ function collectSiteStats(site) {
 }
 
 function getReportWindow(now = new Date()) {
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const start = new Date(end);
-  start.setDate(start.getDate() - (RETENTION_DAYS - 1));
+  const shanghaiMs = now.getTime() + 8 * 3600000;
+  const y = new Date(shanghaiMs).getUTCFullYear();
+  const m = new Date(shanghaiMs).getUTCMonth();
+  const d = new Date(shanghaiMs).getUTCDate();
+  const end = new Date(Date.UTC(y, m, d));
+  const start = new Date(end.getTime() - (RETENTION_DAYS - 1) * 86400000);
   return { start, end };
 }
 
 function parseFileDate(fileName) {
   const match = /^(\d{4})-(\d{2})-(\d{2})\.xlsx$/.exec(fileName);
   if (!match) return null;
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  if (date.getFullYear() !== Number(match[1]) || date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (date.getUTCFullYear() !== Number(match[1]) || date.getUTCMonth() !== Number(match[2]) - 1 || date.getUTCDate() !== Number(match[3])) return null;
   return date;
 }
 
 function formatDateForFile(date) {
-  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+  return [date.getUTCFullYear(), String(date.getUTCMonth() + 1).padStart(2, '0'), String(date.getUTCDate()).padStart(2, '0')].join('-');
 }
 
 // .xlsx 是 zip 包（魔数 PK\x03\x04）。先验魔数：xlsx 库对非 zip 内容会静默返回空表，
@@ -92,17 +95,24 @@ function readRows(filePath) {
   try {
     const head = Buffer.alloc(4);
     fd = fs.openSync(filePath, 'r');
-    fs.readSync(fd, head, 0, 4, 0);
-    if (head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) {
+    const bytesRead = fs.readSync(fd, head, 0, 4, 0);
+    if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) {
       throw new Error('不是有效的 xlsx（zip）文件');
     }
-    const wb = xlsx.readFile(filePath);
-    return xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
   } catch (error) {
     log(`读取 ${filePath} 失败，已跳过：${error.message}`, { site: path.basename(path.dirname(filePath)) });
     return null;
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+    if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
+  }
+  try {
+    const wb = xlsx.readFile(filePath);
+    const sheetName = wb.SheetNames && wb.SheetNames[0];
+    if (!sheetName || !wb.Sheets[sheetName]) return [];
+    return xlsx.utils.sheet_to_json(wb.Sheets[sheetName]);
+  } catch (error) {
+    log(`读取 ${filePath} 失败，已跳过：${error.message}`, { site: path.basename(path.dirname(filePath)) });
+    return null;
   }
 }
 

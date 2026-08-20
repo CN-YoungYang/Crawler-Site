@@ -61,7 +61,7 @@ Site-aware (index + crawler + log + report + sites registry), data flow is linea
 ## Conventions worth knowing
 
 - UX strings, log messages, and CLI usage text are in **Chinese** — match this when editing user-facing output.
-- `page_content.html` is a captured sample of a target page response, useful for testing cheerio selectors offline.
+- `page_content.html` 是 yfbzb 的离线样页快照，用于离线校验 cheerio 选择器；ceb 无随仓样页（由 `.dockerignore` 的 `page_content*.html` 排除于镜像），回归需以线上解析/测试为准。
 - The crawler uses static `axios` fetches, not a headless browser. (`puppeteer` was previously listed in `package.json` but never imported; it has been removed. Don't assume a browser-rendering path exists.)
 - The target query encodes fixed filters (`provinceId=12&noticeType=3&invitedBidType=3`); per-site values now live in `sites/<site>.js` (`baseUrl`/`urlSuffix`/`selectors` plus optional strategy hooks `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`), edited via site config rather than hardcoded strings in `crawl()`. See `sites/_base.js` for defaults and `sites/demo.js` for an example API site.
 - **Failure-vs-boundary separation** (post-grilling fix): a page that 403s is an `endReached` data boundary (logged as "无新增数据（站点边界）"), not a failure; genuine network errors retry (exponential backoff + jitter) then become `failed` and count toward `failureThreshold`. The two used to share the `hasNewData:false` path and triggered false early-stops — keep them separate. `isBoundary` is pluggable per-site.
