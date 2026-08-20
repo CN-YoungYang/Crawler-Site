@@ -1,1 +1,198 @@
 # Crawler-Site
+
+Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 GHCR 自动发布。
+
+> ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值见 `sites/_base.js`），`sites/yfbzb.js` 为当前实站、`sites/demo.js` 为策略示例、`sites/site2.js` 为占位骨架。
+
+## 功能
+
+- 分页抓取招标信息：标题、链接、公告类型、地区、发布时间
+- 按 `id` 去重，避免重复入库（内存 + 落盘合并双重去重）
+- 按站点与发布日期分区存储为 Excel：`file/<site>/YYYY-MM-DD.xlsx`（如 `file/yfbzb/2026-08-19.xlsx`），历史扁平 `file/*.xlsx` 保留不迁移
+- 失败页与“数据到底”分离识别，越界页（403）不再误判为加载失败、不会因单页失败而提前终止整次爬取
+- 失败日志带 `error.code` / HTTP `status`，便于诊断
+- 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
+- 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
+- 双通道日志：控制台中文（`[site]` 前缀，`docker logs` 可区分）+ 结构化 JSONL，按站点按日分割 `logs/<site>/crawler-YYYY-MM-DD.jsonl`、30 天保留，`pruneOldLogs(site)` 与报告同窗口清理
+- Docker 常驻：一容器并发多站点（`SITES=yfbzb,demo`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，bind mount 持久化 `file/`/`logs/`
+
+## 环境要求
+
+- Node.js（建议 18+）；容器运行需 Docker / Docker Compose
+- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`（实际走 `axios` 静态抓取，无浏览器渲染依赖）
+
+安装依赖：
+
+```bash
+npm install
+```
+
+## 使用方法
+
+### 本地（宿主机）
+
+```bash
+node index.js [页数] [间隔时间(毫秒)] [最小延迟(秒)] [最大延迟(秒)]
+```
+
+| 位置 | 参数 | 默认值 | 说明 |
+|------|------|--------|------|
+| 1 | 页数 | 100 | 最多爬取的页数 |
+| 2 | 间隔时间 | 5000 | 相邻批次之间的等待毫秒数 |
+| 3 | 最小延迟 | 0 | 爬取开始前的随机等待区间下限（秒） |
+| 4 | 最大延迟 | 300 | 爬取开始前的随机等待区间上限（秒） |
+
+参数 3、4 仅用于**爬取开始前**的随机延迟，不影响逐批间隔。
+
+```bash
+# 爬 10 页，批次间隔 5 秒，立即开始
+node index.js 10 5000 0 0
+
+# 默认：100 页，批次间隔 5 秒，开始前随机等待 0~300 秒
+node index.js
+```
+
+### 环境变量（容器推荐，优先级高于位置参数）
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,demo`；`SITE` 单站点兼容；未实现站点在多站点模式下 warn 跳过、单站点下 fail-fast |
+| `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_DEMO=50`） |
+| `INTERVAL_MS` / `INTERVAL` | 5000 | 同位置参数 2；支持每站覆盖 `INTERVAL_MS_<SITE>` |
+| `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
+| `MAX_DELAY_S` / `MAX_DELAY` | 300 | 同位置参数 4；支持每站覆盖 `MAX_DELAY_S_<SITE>` |
+| `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（如 `0 2 * * *` 表每日 02:00）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_DEMO="0 3 * * *"`）或 `SITES_CONFIG` JSON |
+
+```bash
+SITES=yfbzb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
+# 每站独立定时与页数
+SITES=yfbzb,demo CRON_YFBZB="0 2 * * *" CRON_DEMO="0 3 * * *" TOTAL_PAGES_DEMO=50 node index.js
+# 或 JSON 方式
+SITES=yfbzb,demo SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"demo":{"cron":"0 3 * * *","totalPages":50}}' node index.js
+```
+
+### Docker / Compose（推荐）
+
+```bash
+docker build -t crawler:local .
+docker compose up -d --build
+docker compose logs -f crawler
+docker compose down
+```
+
+`docker-compose.yml` 为单服务 `crawler`，通过 `SITES=yfbzb,demo` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据与日志通过 bind mount 持久化：
+
+```yaml
+volumes:
+  - ./file:/app/file
+  - ./logs:/app/logs
+```
+
+崩溃续跑如需保留 checkpoint，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-demo.json:/app/state-demo.json`。
+
+> 镜像 `TZ=Asia/Shanghai` 已在 `Dockerfile` 中固定（`tzdata`），否则 `readRecentIds()` / `publishTime` 分区会因 UTC 错一天。
+
+## 输出
+
+- **日志**：双通道。控制台中文实时输出（`[ISO] [PID: xxx] [yfbzb] ...`），`docker logs` 按站点可区分；同时写结构化 JSONL 到 `logs/<site>/crawler-YYYY-MM-DD.jsonl`（按站点按日分割，`event`/`site` 字段可 grep），供程序回溯。日志与 Excel 同享 30 天保留窗口，生成报告时一并清理过期日志。例如：
+
+  ```
+  [2026-08-14T06:35:01.358Z] [PID: 10572] [yfbzb] 爬取完成第 4 页，共找到 30 条新数据
+  [2026-08-14T06:35:01.113Z] [PID: 10572] [yfbzb] 第 10 页无新增数据（站点边界），已爬至当日末尾
+  ```
+
+- **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；报告（`index.html`/`tokens.css`/`<date>.html`）同落 `file/<site>/`。
+- **Checkpoint**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
+
+## 工作原理
+
+整体数据流（`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js`）：
+
+1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`）。
+
+2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
+   - **站点策略**：`sites/yfbzb.js` 实站、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
+   - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒。
+   - **逐页抓取**：`crawlPage()` 用 `axios` 取页面（每站 `timeout`/`headers` 可覆写）+ 站点策略解析（`parse` 完全接管或 `selectors` 默认）。网络/超时类错误最多重试 3 次，退避为指数 + 全量抖动（`base=2s`、封顶 60s），避免齐刷刷重试撞站；`isBoundary` 判定边界（默认 403）。
+   - **终止条件**（三者满足其一即停）：
+     - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
+     - 已爬到 `totalPages`（CLI 页数边界）
+     - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
+   - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
+   - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
+   - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。
+   - **优雅退出**：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 发送 `SIGTERM` 同理。
+
+### 关于 403（重要）
+
+**目标站点对 `pageNo` 超出“当日可访数据”的请求返回 403，这是正常的数据边界信号，不是加载失败。**
+
+本爬虫据此做了专门处理：
+
+- 收到 403 的页不会重试，会被标记为 `endReached`（已到末尾），爬虫据此干净停止；
+- 失败日志中此类页显示为“无新增数据（站点边界），已爬至当日末尾”，而非报错；
+- 真正的网络/超时错误才走重试与失败计数路径。
+
+当日真实数据边界以实际 403 为准；不要把站点展示的近 1 个月存量总数当作当日可访问页数。
+
+## GHCR 自动构建
+
+`.github/workflows/docker-build.yml` 在 `push main` / `tag v*` / `workflow_dispatch` 时触发：
+
+- `npm ci` + `npm test` 门禁
+- `docker/build-push-action` 多架构 `linux/amd64,linux/arm64`（`setup-qemu` + `setup-buildx`），`gha` 缓存
+- `docker/metadata-action` 生成标签：`latest`（仅 `main`）+ `sha` + `semver`/`major.minor`
+- 推送至 `ghcr.io/<owner>/crawler`（需仓库 `Settings > Actions > Workflow permissions` 开 `Read and write`）
+
+## 可调常量
+
+`crawler.js` 顶部定义了可调常量，便于针对性优化：
+
+| 常量 | 默认 | 作用 |
+|------|------|------|
+| `FAILURE_STOP_THRESHOLD` | 2 | 一批中失败页数超过此值则不触发“无新数据”早停，避免失败页伪装无新数据导致误停；可被站点 `failureThreshold` 覆盖 |
+| `BATCH_SIZE` | 10 | 每批并发页数；可被站点 `batchSize` 覆盖 |
+| `REQUEST_TIMEOUT` | 30000 | axios 单次请求超时（毫秒）；可被站点 `timeout` 覆盖 |
+| `BACKOFF_BASE_MS` | 2000 | 重试退避指数基数（`base*2^attempt`） |
+| `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
+| `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
+
+## 目录结构
+
+```
+crawler/
+├── index.js              # 入口：环境变量/参数解析、校验、调度（CRON/单次常驻）
+├── crawler.js            # 爬取核心：crawl() 编排 + crawlPage() 逐页抓取 + checkpoint（按站点）
+├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
+├── report.js             # 报告：scanFiles(site)/generateReport(site)，按站点生成 HTML
+├── sites/
+│   ├── index.js          # 站点注册表：getSiteConfig(site)/getSiteConfigs(sites)/parseSitesList()/listEnabledSites()
+│   ├── _base.js          # 默认策略：defaultBuildUrl/defaultParse/defaultExtractId/defaultIsBoundary
+│   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix
+│   ├── demo.js           # 策略示例：buildUrl/parse/isBoundary/batchSize 等钩子示例
+│   └── site2.js          # 占位骨架：baseUrl 为空，fail-fast
+├── Dockerfile            # node:20-alpine + tzdata + TZ=Asia/Shanghai + USER node
+├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE>），bind mount file/logs
+├── .dockerignore
+├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
+├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
+├── docs/
+│   ├── adr/0001-docker-site-isolation.md  # Docker/GHCR/多站点隔离决策
+│   └── agents/domain.md / issue-tracker.md
+├── page_content.html     # 一份历史页面样本，离线验证 cheerio 选择器用
+├── file/                 # 输出：file/<site>/YYYY-MM-DD.xlsx + 报告（bind mount 持久化）
+├── logs/                 # 日志：logs/<site>/crawler-YYYY-MM-DD.jsonl（bind mount 持久化）
+├── state-<site>.json     # 按站点 checkpoint（每批写入，正常完成即删）
+├── package.json
+├── CLAUDE.md             # 给 AI 助手的代码库指引
+└── AGENTS.md             # 贡献者指南
+```
+
+## 已知限制
+
+- 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
+- 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
+- `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
+- 若目标站点日后上 JS 渲染 / 反爬挑战，纯 `axios` 可能取不到完整 HTML——届时需引入带浏览器指纹的抓取方式。
+- 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,demo` 在多站点模式下占位站点 warn 跳过。
+- agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

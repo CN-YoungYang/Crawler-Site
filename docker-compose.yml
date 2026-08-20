@@ -1,0 +1,30 @@
+services:
+  crawler:
+    build: .
+    image: ghcr.io/${GITHUB_REPOSITORY:-local}/crawler:latest
+    container_name: crawler
+    environment:
+      # 多站点：逗号分隔，容器内并发爬取，每站独立定时与逻辑
+      SITES: yfbzb
+      # 兼容单站点旧变量
+      # SITE: yfbzb
+      TOTAL_PAGES: "100"
+      INTERVAL_MS: "5000"
+      MIN_DELAY_S: "0"
+      MAX_DELAY_S: "300"
+      CRON_EXPR: "0 2 * * *"
+      # 每站独立覆盖（可选，优先级高于全局）：
+      # CRON_YFBZB: "0 2 * * *"
+      # CRON_SITE2: "0 3 * * *"
+      # TOTAL_PAGES_SITE2: "50"
+      # INTERVAL_MS_SITE2: "3000"
+      # 或 JSON 方式：
+      # SITES_CONFIG: '{"yfbzb":{"totalPages":100,"cron":"0 2 * * *"},"site2":{"totalPages":50,"cron":"0 3 * * *"}}'
+      TZ: Asia/Shanghai
+    volumes:
+      - ./file:/app/file
+      - ./logs:/app/logs
+      # 崩溃续跑：如需保留 checkpoint，按站点分别挂载
+      # - ./state-yfbzb.json:/app/state-yfbzb.json
+      # - ./state-site2.json:/app/state-site2.json
+    restart: unless-stopped

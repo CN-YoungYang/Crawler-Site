@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+file
+logs
+state*.json
+.git
+.github
+.scratch
+.scratch/**
+*.md
+!README.md
+test
+page_content.html
+.claude

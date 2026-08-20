@@ -1,0 +1,58 @@
+# ADR 0001 — Docker 化、GHCR 自动构建与多站点隔离
+
+- **日期**: 2026-08-19
+- **状态**: 已采纳
+- **上下文**: 见 `CONTEXT.md`；原项目为裸 `node index.js [pages] [interval] [minDelay] [maxDelay]` 一次性批处理，`file/`/`logs/`/`state.json` 落 cwd，无镜像、无 CI、换机器即丢数据。用户要求常驻容器、GHCR 自动发布，并为多站点预留可演进的扩展位，产物按 `file/<site>/` 分站点隔离、旧数据不迁移。2026-08-20 修订为 **一容器并发多站点、各站独立逻辑与定时**（策略化）。
+- **关联烤问**: 8+2 约束已收敛（常驻 / 环境变量 / `TZ=Asia/Shanghai` / GHCR / 配置对象占位 / `file/<site>/`+日志隔离 / 一容器多站点并发 / 策略化 / 不迁移），详见 `.scratch` 与 `CLAUDE.md`。
+
+## 决策
+
+1. **常驻形态：Node 内置定时 > 系统 cron**
+   - 采用 `index.js#scheduleLoop` + `nextCronDelay("m h * * *")` + `sleepInterruptible(1s 轮询 isStopping)`，`CRON_EXPR` 为空则单次后常驻、`m h * * *` 则每日定时（如 `0 2 * * *`）。
+   - 理由：Alpine `crond`/`supercronic` 需额外包、信号/日志/时区坑多；Node 侧零依赖即可满足 `0 2 * * *` 场景，且与既有 `SIGINT`/`SIGTERM` 优雅退出（`isStopping()`）天然衔接，`docker stop` 可被 1s 中断。
+
+2. **参数：环境变量优先、位置参数回退（支持多站点）**
+   - `parseEnv()` 合并 `SITES`（逗号分隔，`SITES=yfbzb,demo`）/`SITE`/`CRAWLER_SITE`、`TOTAL_PAGES`/`PAGES`、`INTERVAL_MS`/`INTERVAL`、`MIN_DELAY_S`/`MIN_DELAY`、`MAX_DELAY_S`/`MAX_DELAY`、`CRON_EXPR`/`CRON`，未设回退到 `parseArguments()`；每站独立覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`CRON_EXPR_<SITE>`，或 `SITES_CONFIG` JSON（`{"yfbzb":{"cron":"0 2 * * *"}}`），优先级：每站 env > JSON > 全局 env > argv。`parseSitesList()`/`normalizeSites()` 负责解析与去重。
+   - `validateInput` 逐站 `getSiteConfig(site)` 校验站点、以 `nextCronDelay(cronExpr)` 校验每站 cron；`SITES` 多值下占位/未知站点 warn 跳过（保留有效站点继续运行），单站点下仍 fail-fast；`require.main===module` 守卫避免 `require` 时自启动。
+
+3. **持久化：bind mount > named volume（多站点共享）**
+   - `docker-compose.yml` 单服务 `crawler` 采用 `./file:/app/file`、`./logs:/app/logs`，`file/<site>/`、`logs/<site>/` 人可直读、可备份、按站点隔离；`state-<site>.json` 按站点隔离，默认不挂载（随容器生命周期，正常完成即删），需崩溃续跑可按站点显式挂载 `./state-yfbzb.json:/app/state-yfbzb.json` `./state-demo.json:/app/state-demo.json`。一容器内多站点并发写不同子目录，不冲突。
+
+4. **镜像与时区**
+   - `Dockerfile`: `node:20-alpine` + `tzdata` + `ENV TZ=Asia/Shanghai` + `WORKDIR /app` + `USER node` + `ENTRYPOINT ["node","index.js"]`。未固定时区会导致 `readRecentIds()`/`publishTime` 分区按 UTC 错一天。
+
+5. **GHCR 发布**
+   - `.github/workflows/docker-build.yml`: `push main` / `tag v*` / `workflow_dispatch` 触发，`setup-qemu`+`setup-buildx` 多架构 `linux/amd64,linux/arm64`，`docker/metadata-action` 生成 `latest`（仅 main）+ `sha` + `semver`/`major.minor`，`gha` 缓存，`npm ci`+`npm test` 门禁，推送至 `ghcr.io/<owner>/crawler`（需 `Settings > Actions > Workflow permissions: Read and write`）。
+
+6. **多站点：配置对象 + 策略钩子（2026-08-20 修订）**
+   - `sites/yfbzb.js` 实站（`linkPrefix`）、`sites/demo.js` 策略示例（展示 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`failureThreshold`/`timeout`/`headers` 钩子）、`sites/site2.js` 骨架占位（`baseUrl=""`、`disabledReason`，`getSiteConfig` 触发 fail-fast）、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`，供站点复用）、`sites/index.js` 注册表 `registry`/`normalizeSite()`/`normalizeSites()`/`parseSitesList()`/`getSiteConfig()`/`getSiteConfigs()`/`listSites()`/`listEnabledSites()`。新增站点只需加一个配置对象（`sites/<site>.js`）并在 `SITES` 中列出，无需改 `docker-compose.yml` 多服务。
+   - 贯穿站点化：`crawler.js#fileDir(site)`→`file/<site>/`、`stateFile(site)`→`state-<site>.json`、`readRecentIds(site)`、`crawl({site})`/`crawlPage(pageNo, siteConfig, …)` 委托站点策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`timeout`/`headers`，缺省走 `selectors`）；`log.js#log(msg,{site})`/`logDir(site)`/`pruneOldLogs(site)`（并发下必须显式传 `site`，`setSite` 保留兼容但会竞态）；`report.js#fileDir(site)`/`scanFiles(site)`/`generateReport(site)`/`generateAllReports(sites)`（后者 `Promise.all` 并发）。旧 `(baseUrl, urlSuffix)` / `(totalPages, interval)` 签名保留以兼容 `test/*.test.js`。
+   - 调度：`index.js#scheduleLoop` 每站一 `scheduleLoopForSite` 并发（`Promise.all`），`SITES` 逗号分隔，`CRON_<SITE>` 每站独立定时（`nextCronDelay` 仍仅 `m h * * *`），`sleepInterruptible` 1s 轮询 `isStopping()`。无 cron 时各站并发单次后常驻；有 cron 时各站独立定时循环。
+
+7. **存放隔离与旧数据**
+   - 产出 `file/<site>/YYYY-MM-DD.xlsx`、`logs/<site>/crawler-YYYY-MM-DD.jsonl`、`state-<site>.json` 全量按站点隔离；日志 `event`/`site` 可 grep，控制台 `[site]` 前缀便于 `docker logs` 按站点区分。一容器并发多站点时各站独立子目录，`SITES` 多值下占位站点 warn 跳过不落脏文件，单站点 `SITE=site2` 仍 fail-fast 不得创建 `file/site2/`/`logs/site2/`。历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`。
+
+## 修订 2026-08-20 — 一容器多站点并发与策略化
+
+- **背景**: 用户要求一容器爬多个站点且每站逻辑不同、每站独立定时、容器内并发；先做扩展位（钩子打通，不一次性实现所有重逻辑）。
+- **变更**: `SITES` 逗号分隔 + `CRON_<SITE>`/`TOTAL_PAGES_<SITE>`/`SITES_CONFIG` 每站覆盖；`index.js` 每站 `scheduleLoopForSite` 并发（`Promise.all`）；`crawler.js` 委托 `sites/<site>.js` 策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`，`sites/_base.js` 默认）；`log.js` 要求 `log(msg,{site})` 显式传 `site` 以避免 `currentSite` 并发竞态；`report.js` `generateAllReports` 改 `Promise.all`；`docker-compose.yml` 单服务 `crawler` 替代一服务一站点。
+- **兼容**: `SITE` 单站点、`CRON_EXPR` 全局、`crawl({site})` 旧签名均保留；`yfbzb` 现有行为不变。
+
+## 后果
+
+- 正面：换机器/重装可通过 `docker compose up -d` 常驻、`ghcr.io` 拉取、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。
+- 负面/权衡：`nextCronDelay` 仅支持 `m h * * *`，复杂 cron 需另引依赖；多架构构建在 x86 runner 上 QEMU 较慢（需要时可先单架构）；一容器内 `N*batchSize` 并发可能对目标站限流敏感，可通过站点 `batchSize` 自降并发或后续加站间错峰/全局限流。
+
+## 备选方案（已否决）
+
+- `supercronic`/`crond` 常驻：额外进程与信号/时区复杂度，不采纳。
+- Named volume：宿主机不可直读、站点隔离不直观，不采纳。
+- 策略类/插件抽象：第二站点完全未知，过度抽象，不采纳。
+
+## 验证
+
+- `npm test` / `node test/run.js` 6 套件全绿（`withTempCwd` 按 `file/<site>/`/`logs/<site>/`/`state-<site>.json` 隔离）。
+- `SITE=site2` 单站点启动即 `getSiteConfig` 抛错、exit 1，不落脏文件；`SITES=yfbzb,site2` 多站点下 `site2` warn 跳过、`yfbzb` 正常运行（`file/site2/`/`logs/site2/` 不创建）。
+- 策略钩子：`buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`linkPrefix` 均有单测/冒烟覆盖；`SITES=yfbzb,demo` 并发冒烟 `file/yfbzb/` 与 `file/demo/`、`logs/yfbzb/` 与 `logs/demo/` 隔离且 `site` 前缀正确。
+- 每站独立定时：`CRON_YFBZB`/`CRON_DEMO`/`SITES_CONFIG` 解析与 `nextCronDelay` 逐站校验。
+- 本地 `docker build` + `docker compose up -d --build` + `docker compose logs -f crawler` 可观测多站点 `[yfbzb]`/`[demo]` 日志与 `file/<site>/` 产出；`docker stop` 触发所有站点当前批次优雅落盘。
