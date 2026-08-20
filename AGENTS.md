@@ -15,7 +15,7 @@ This is a Node.js crawler for public bidding notices from `yfbzb.com` (with mult
 - `logs/`: generated JSONL logs, per-site per-day (`logs/yfbzb/crawler-YYYY-MM-DD.jsonl`). Created at runtime; pruned on a 30-day window by `report.js`.
 - `state-<site>.json`: transient per-site checkpoint (cwd-relative); written each batch, deleted on clean finish. Per-site, no collision under concurrent multi-site (one container multiple sites).
 - `server.js`: static server for `file/` (see above), started by `index.js`, fronted by external reverse proxy for domain.
-- `Dockerfile` / `.dockerignore` / `docker-compose.yml`: container image (`node:20-alpine` + `tzdata` + `TZ=Asia/Shanghai` + `EXPOSE 8080`) and single-service compose with `SITES=yfbzb,site2` concurrent (bind mount `file/`/`logs/`, `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`, `healthcheck` on `/health`, per-site `CRON_<SITE>`/`TOTAL_PAGES_<SITE>` env, `HTTP_PORT`/`HTTP_ENABLED`).
+- `Dockerfile` / `.dockerignore` / `docker-compose.yml`: container image (`node:20-alpine` + `tzdata` + `TZ=Asia/Shanghai` + `EXPOSE 8080`) and single-service compose with `SITES=yfbzb,ceb` concurrent (bind mount `file/`/`logs/`, `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`, `healthcheck` on `/health`, per-site `CRON_<SITE>`/`TOTAL_PAGES_<SITE>` env, `HTTP_PORT`/`HTTP_ENABLED`).
 - `.github/workflows/docker-build.yml`: GHCR build & push on `push main` / `tag v*` / `workflow_dispatch` (`npm test` gate, `gha` cache, `linux/amd64,linux/arm64`).
 - `page_content.html`: captured response useful for validating Cheerio selectors offline.
 - `docs/agents/`: local workflow and domain notes.
@@ -25,7 +25,7 @@ This is a Node.js crawler for public bidding notices from `yfbzb.com` (with mult
 
 - `npm install`: install declared dependencies.
 - `node index.js [pages] [intervalMs] [minDelaySec] [maxDelaySec]`: run the crawler. Example: `node index.js 10 5000 0 0`.
-- `SITES=yfbzb,demo TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js`: env overrides argv; `SITES` comma-separated concurrent, `SITE` single-site compat, `CRON_<SITE>`/`TOTAL_PAGES_<SITE>` per-site override or `SITES_CONFIG` JSON; `CRON_EXPR` empty = single run + keepalive, `m h * * *` = daily schedule (`nextCronDelay`), per-site independent.
+- `SITES=yfbzb,ceb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js`: env overrides argv; `SITES` comma-separated concurrent, `SITE` single-site compat, `CRON_<SITE>`/`TOTAL_PAGES_<SITE>` per-site override or `SITES_CONFIG` JSON; `CRON_EXPR` empty = single run + keepalive, `m h * * *` = daily schedule (`nextCronDelay`), per-site independent.
 - `node test/run.js` or `npm test`: run the complete test suite (zero-dep `assert`, `freshCrawler()` + `withTempCwd()` isolation).
 - `docker build -t crawler:local .` / `docker compose up -d --build` / `docker compose logs -f crawler` / `curl http://127.0.0.1:8080/health | jq` / `docker compose down`: container run (`TZ=Asia/Shanghai`, bind mount `file/`/`logs/`, `SITES` multi-site, `HTTP_PORT` 8080 hosted nav at `/` + per-site reports at `/<site>/` + advanced probe at `/health`).
 
@@ -39,7 +39,7 @@ Keep `crawler.js` behavior explicit: 403 (or site `isBoundary`) represents the s
 
 ## Testing Guidelines
 
-Tests use Node's built-in assertion facilities and mock `axios` through `require.cache`. Use `freshCrawler()` from `test/helper.js` when a test needs a new mocked crawler module, and `withTempCwd()` for tests that write Excel files or logs (it isolates `file/<site>/`, `logs/<site>/`, and `state-<site>.json` to a temp dir via cwd-relative `fileDir(site)`/`logDir(site)`/`stateFile(site)`). Cover parsing/deduplication, 403 boundaries, retry backoff, file merging, and crawl termination as applicable. Run `node test/run.js` (or `npm test`) before submitting changes. `SITE=site2` fails fast (placeholder); `SITES=yfbzb,demo` with mock should verify `file/<site>/`/`logs/<site>/` isolation.
+Tests use Node's built-in assertion facilities and mock `axios` through `require.cache`. Use `freshCrawler()` from `test/helper.js` when a test needs a new mocked crawler module, and `withTempCwd()` for tests that write Excel files or logs (it isolates `file/<site>/`, `logs/<site>/`, and `state-<site>.json` to a temp dir via cwd-relative `fileDir(site)`/`logDir(site)`/`stateFile(site)`). Cover parsing/deduplication, 403 boundaries, retry backoff, file merging, and crawl termination as applicable. Run `node test/run.js` (or `npm test`) before submitting changes. `SITE=site2` fails fast (placeholder); `SITES=yfbzb,ceb` with mock should verify `file/<site>/`/`logs/<site>/` isolation.
 
 ## Commit & Pull Request Guidelines
 
@@ -47,4 +47,4 @@ Follow Conventional Commit prefixes with a concise Chinese summary, for example:
 
 ## Security & Configuration
 
-Respect the target site's crawler policy and rate limits. Query filters, URLs, and selectors are site-specific per `sites/<site>.js` (`baseUrl`/`urlSuffix`/`selectors` plus optional `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`) and consumed by `crawler.js`; review `sites/index.js` registry and `sites/_base.js` defaults before changing crawl scope. One container multiple sites concurrent (`SITES=yfbzb,demo` via `Promise.all`, per-site `CRON_<SITE>` independent); `site2` is a skeleton and must fail fast (skipped with warn in multi-site mode). Do not commit credentials or generated output (`file/`/`logs/`/`state-<site>.json`). `TZ=Asia/Shanghai` is required in image/compose — otherwise date partitioning drifts.
+Respect the target site's crawler policy and rate limits. Query filters, URLs, and selectors are site-specific per `sites/<site>.js` (`baseUrl`/`urlSuffix`/`selectors` plus optional `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`) and consumed by `crawler.js`; review `sites/index.js` registry and `sites/_base.js` defaults before changing crawl scope. One container multiple sites concurrent (`SITES=yfbzb,ceb` via `Promise.all`, per-site `CRON_<SITE>` independent); `site2` is a skeleton and must fail fast (skipped with warn in multi-site mode). Do not commit credentials or generated output (`file/`/`logs/`/`state-<site>.json`). `TZ=Asia/Shanghai` is required in image/compose — otherwise date partitioning drifts.

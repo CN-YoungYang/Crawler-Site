@@ -4,8 +4,6 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 
 > ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值见 `sites/_base.js`），`sites/yfbzb.js` 与 `sites/ceb.js` 为当前实站、`sites/demo.js` 为策略示例、`sites/site2.js` 为占位骨架。
 
-> ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值见 `sites/_base.js`），`sites/yfbzb.js` 为当前实站、`sites/demo.js` 为策略示例、`sites/site2.js` 为占位骨架。
-
 ## 功能
 
 - 分页抓取招标信息：标题、链接、公告类型、地区、发布时间
@@ -19,7 +17,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
 - 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
 - 双通道日志：控制台中文（`[site]` 前缀，`docker logs` 可区分）+ 结构化 JSONL，按站点按日分割 `logs/<site>/crawler-YYYY-MM-DD.jsonl`、30 天保留，`pruneOldLogs(site)` 与报告同窗口清理
-- Docker 常驻：一容器并发多站点（`SITES=yfbzb,demo`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，bind mount 持久化 `file/`/`logs/`
+- Docker 常驻：一容器并发多站点（`SITES=yfbzb,ceb`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，bind mount 持久化 `file/`/`logs/`
 
 ## 环境要求
 
@@ -61,12 +59,12 @@ node index.js
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,demo`；`SITE` 单站点兼容；未实现站点在多站点模式下 warn 跳过、单站点下 fail-fast |
-| `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_DEMO=50`） |
+| `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb,ceb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,ceb`（实站）或 `SITES=yfbzb,demo`（示例）；`SITE` 单站点兼容；未实现站点在多站点模式下 warn 跳过、单站点下 fail-fast |
+| `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_CEB=50`） |
 | `INTERVAL_MS` / `INTERVAL` | 5000 | 同位置参数 2；支持每站覆盖 `INTERVAL_MS_<SITE>` |
 | `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
 | `MAX_DELAY_S` / `MAX_DELAY` | 300 | 同位置参数 4；支持每站覆盖 `MAX_DELAY_S_<SITE>` |
-| `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（如 `0 2 * * *` 表每日 02:00）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_DEMO="0 3 * * *"`）或 `SITES_CONFIG` JSON |
+| `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（如 `0 2 * * *` 表每日 02:00）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_CEB="0 3 * * *"`）或 `SITES_CONFIG` JSON |
 | `HTTP_PORT` / `PORT` | 8080 | 静态服务监听端口（托管 `file/`，`EXPOSE 8080`，`ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`）；由外部反代将 `80/443 → HTTP_PORT` 以域名暴露 |
 | `HTTP_ENABLED` | true | 设为 `false` 禁用内置静态服务（仅保留爬取与报告生成） |
 | `TZ` | `Asia/Shanghai` | 容器时区，必须与 `Dockerfile` `ENV TZ` 一致，否则日期分区错一天 |
@@ -74,9 +72,9 @@ node index.js
 ```bash
 SITES=yfbzb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
 # 每站独立定时与页数
-SITES=yfbzb,demo CRON_YFBZB="0 2 * * *" CRON_DEMO="0 3 * * *" TOTAL_PAGES_DEMO=50 node index.js
+SITES=yfbzb,ceb CRON_YFBZB="0 2 * * *" CRON_CEB="0 3 * * *" TOTAL_PAGES_CEB=50 node index.js
 # 或 JSON 方式
-SITES=yfbzb,demo SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"demo":{"cron":"0 3 * * *","totalPages":50}}' node index.js
+SITES=yfbzb,ceb SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"ceb":{"cron":"0 3 * * *","totalPages":50}}' node index.js
 ```
 
 ### Docker / Compose（推荐）
@@ -180,11 +178,13 @@ server {
 | 常量 | 默认 | 作用 |
 |------|------|------|
 | `FAILURE_STOP_THRESHOLD` | 2 | 一批中失败页数超过此值则不触发“无新数据”早停，避免失败页伪装无新数据导致误停；可被站点 `failureThreshold` 覆盖 |
-| `BATCH_SIZE` | 10 | 每批并发页数；可被站点 `batchSize` 覆盖 |
+| `BATCH_SIZE` | 10 | 每批并发页数；可被站点 `batchSize` 覆盖（`ceb` 为风控串行设为 1） |
 | `REQUEST_TIMEOUT` | 30000 | axios 单次请求超时（毫秒）；可被站点 `timeout` 覆盖 |
 | `BACKOFF_BASE_MS` | 2000 | 重试退避指数基数（`base*2^attempt`） |
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
+
+> `ceb` 站额外通过 `requestDelay: {min:2500, max:5500}` 在每次请求前增加随机抖动，配合 `batchSize=1` 与 `isBoundary` 的 429 重试语义降低限频风险。
 
 ## 目录结构
 
@@ -226,5 +226,5 @@ crawler/
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上 JS 渲染 / 反爬挑战，纯 `axios` 可能取不到完整 HTML——届时需引入带浏览器指纹的抓取方式。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
-- 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,demo` 在多站点模式下占位站点 warn 跳过。
+- 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,site2` 在多站点模式下占位站点 warn 跳过。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

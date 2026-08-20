@@ -10,5 +10,5 @@ state*.json
 *.md
 !README.md
 test
-page_content.html
+page_content*.html
 .claude
