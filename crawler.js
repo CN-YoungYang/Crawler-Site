@@ -117,6 +117,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     : defaultBuildUrl(pageNo, siteConfig);
 
   let retries = 0;
+  // 方法容错：默认 GET，405 时可降级为 POST（ceb WAF 场景）
+  let method = (siteConfig.method || 'GET').toUpperCase();
+  let triedFallback = false;
 
   // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
   async function maybeThrottle() {
@@ -134,7 +137,16 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   while (retries < maxRetries) {
     try {
       await maybeThrottle();
-      const response = await axios.get(url, { timeout, headers });
+      let response;
+      if (method === 'POST') {
+        const qIdx = url.indexOf('?');
+        const base = qIdx >= 0 ? url.slice(0, qIdx) : url;
+        const query = qIdx >= 0 ? url.slice(qIdx + 1) : '';
+        const postHeaders = { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' };
+        response = await axios.post(base, query, { timeout, headers: postHeaders });
+      } else {
+        response = await axios.get(url, { timeout, headers });
+      }
 
       // 优先使用站点自定义 parse 接管整页解析
       if (typeof siteConfig.parse === 'function') {
@@ -163,11 +175,22 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
         return { pageData: [], failed: false, endReached: true };
       }
+      // 405 自动降级：GET 被 WAF 拒时切 POST 重试一次（不计入重试次数）
+      const errStatus = error.response?.status;
+      if (errStatus === 405 && method === 'GET' && !triedFallback && siteConfig.fallbackOn405 !== false) {
+        triedFallback = true;
+        method = 'POST';
+        const snippet = String(error.response?.data || '').slice(0, 300).replace(/\s+/g, ' ').trim();
+        log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
+        continue;
+      }
       retries++;
       const backoff = backoffDelay(retries - 1);
-      log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${error.response?.status}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: error.response?.status, site: siteName }, site: siteName });
+      const snippet405 = errStatus === 405 ? String(error.response?.data || '').slice(0, 200).replace(/\s+/g, ' ').trim() : '';
+      const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
+      log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries === maxRetries) {
-        log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [code=${error.code} status=${error.response?.status}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, code: error.code, status: error.response?.status, site: siteName }, site: siteName });
+        log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [code=${error.code} status=${errStatus} method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
         return { pageData: [], failed: true };
       }
       await new Promise(resolve => setTimeout(resolve, backoff));
@@ -354,11 +377,12 @@ async function crawl(a, b, c, d) {
     if (batchEndReached) {
       endReached = true;
       shouldStopCrawling = true;
-    } else if (!hasNewDataInBatch && failedCount <= failureThreshold) {
-      log(`当前批次（第 ${currentPage - pagesToCrawl} 到第 ${currentPage - 1} 页）无新数据且失败 ${failedCount} 页（≤ ${failureThreshold}），停止爬取`, { event: 'early_stop', context: { failedCount, threshold: failureThreshold, site }, site });
+    } else if (!hasNewDataInBatch && failedCount === 0) {
+      log(`当前批次（第 ${currentPage - pagesToCrawl} 到第 ${currentPage - 1} 页）无新数据，停止爬取`, { event: 'early_stop', context: { failedCount, threshold: failureThreshold, site }, site });
       shouldStopCrawling = true;
-    } else if (!hasNewDataInBatch && failedCount > failureThreshold) {
-      log(`当前批次无新数据，但失败 ${failedCount} 页（> ${failureThreshold}），失败页可能掩盖新数据，继续爬取下一批`, { level: 'warn', event: 'continue_despite_failures', context: { failedCount, threshold: failureThreshold, site }, site });
+    } else if (!hasNewDataInBatch && failedCount > 0) {
+      // 有失败页时不早停，避免掩盖数据；原阈值仅用于分级（batchSize=1 时单次失败曾误触发早停）
+      log(`当前批次无新数据，但失败 ${failedCount} 页（阈值 ${failureThreshold}），失败页可能掩盖新数据，继续爬取下一批`, { level: 'warn', event: 'continue_despite_failures', context: { failedCount, threshold: failureThreshold, site }, site });
     }
 
     if (!shouldStopCrawling) {

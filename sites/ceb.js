@@ -147,15 +147,15 @@ module.exports = {
   timeout: 30000,
   // 发请求前随机抖动（crawler.js 识别此字段）
   requestDelay: { min: 2500, max: 5500 },
+  // 405 容错：GET 被 WAF 拒时自动降级为 POST（crawler.js 识别）
+  method: 'GET',
+  fallbackOn405: true,
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    // 精简指纹：移除 Sec-Fetch-* / Upgrade-Insecure-Requests，避免与 WAF 校验不一致触发 405
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9',
-    'Referer': 'https://bulletin.cebpubservice.com/',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'iframe',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'same-origin'
+    'Referer': 'https://bulletin.cebpubservice.com/'
   },
   buildUrl,
   extractId,
