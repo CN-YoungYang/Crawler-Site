@@ -36,23 +36,37 @@ function todayStamp(d = new Date()) {
 
 // 按日写 JSONL：首次写时建目录。文件名含日期，天然按日分割。
 function appendJsonl(line, site) {
-  const dir = logDir(site);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const fileName = path.join(dir, `crawler-${todayStamp()}.jsonl`);
-  fs.appendFileSync(fileName, line + '\n', 'utf8');
+  try {
+    const dir = logDir(site);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const fileName = path.join(dir, `crawler-${todayStamp()}.jsonl`);
+    fs.appendFileSync(fileName, line + '\n', 'utf8');
+  } catch (e) {
+    // 磁盘只读/宿主机挂载权限（如 ./logs 为 root 属主）导致 EACCES 时不让进程崩溃
+    // 已有控制台输出兜底，此处仅静默吞掉文件通道错误，避免 server 监听回调抛到顶层
+    if (e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
+      console.error(`[log] JSONL 写入失败: ${e.message} code=${e.code}`);
+    }
+  }
 }
 
 // 保留窗口清理：删掉早于 RETENTION_DAYS 天的日志文件。
 function pruneOldLogs(site) {
-  const dir = logDir(site);
-  if (!fs.existsSync(dir)) return;
-  const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
-  const cutoffStr = new Date(new Date(todayStr + 'T00:00:00Z').getTime() - (RETENTION_DAYS - 1) * 86400000).toISOString().slice(0, 10);
-  for (const name of fs.readdirSync(dir)) {
-    const m = /^crawler-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
-    if (!m) continue;
-    if (m[1] < cutoffStr) {
-      fs.unlinkSync(path.join(dir, name));
+  try {
+    const dir = logDir(site);
+    if (!fs.existsSync(dir)) return;
+    const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+    const cutoffStr = new Date(new Date(todayStr + 'T00:00:00Z').getTime() - (RETENTION_DAYS - 1) * 86400000).toISOString().slice(0, 10);
+    for (const name of fs.readdirSync(dir)) {
+      const m = /^crawler-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
+      if (!m) continue;
+      if (m[1] < cutoffStr) {
+        try { fs.unlinkSync(path.join(dir, name)); } catch (_) {}
+      }
+    }
+  } catch (e) {
+    if (e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
+      console.error(`[log] 清理旧日志失败: ${e.message}`);
     }
   }
 }

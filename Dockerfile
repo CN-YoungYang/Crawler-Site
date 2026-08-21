@@ -14,7 +14,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 
 COPY . .
 
-RUN chown -R node:node /app && mkdir -p /app/file /app/logs
+RUN mkdir -p /app/file /app/logs && chown -R node:node /app
 
 EXPOSE 8080
 
