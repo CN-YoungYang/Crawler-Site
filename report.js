@@ -49,9 +49,9 @@ function siteMeta(site) {
   }
 }
 
-function collectSiteStats(site) {
+function collectSiteStats(site, opts = {}) {
   const key = normalizeSite(site);
-  const files = scanFiles(key);
+  const files = scanFiles(key, opts);
   const totalDates = files.length;
   const totalRecords = files.reduce((n, f) => n + f.rows.length, 0);
   const latestUpdate = totalDates ? files[0].date : '-';
@@ -116,14 +116,21 @@ function readRows(filePath) {
   }
 }
 
-function scanFiles(site) {
+const warnedMkdirDirs = new Set();
+function scanFiles(site, opts = {}) {
   const siteName = site ? normalizeSite(site) : defaultSite();
   const dir = fileDir(siteName);
+  const createIfMissing = opts.createDir !== false;
   if (!fs.existsSync(dir)) {
+    if (!createIfMissing) return [];
     try {
       fs.mkdirSync(dir, { recursive: true });
     } catch (e) {
-      log(`创建报告目录失败 ${dir}: ${e.message} code=${e.code}`, { level: 'warn', event: 'report_mkdir_failed', context: { site: siteName, dir, error: e.message, code: e.code }, site: siteName });
+      const code = e.code || e.errno || 'UNKNOWN';
+      if (!warnedMkdirDirs.has(dir)) {
+        warnedMkdirDirs.add(dir);
+        log(`创建报告目录失败 ${dir}: ${e.message} code=${code}（仅首次告警，后续静默避免刷屏；请在宿主机执行 chown -R 1000:1000 file）`, { level: 'warn', event: 'report_mkdir_failed', context: { site: siteName, dir, error: e.message, code }, site: siteName });
+      }
       return [];
     }
     return [];

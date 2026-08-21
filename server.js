@@ -96,7 +96,7 @@ function buildHealthPayload() {
     }
     sites = valid.map(site => {
       try {
-        const st = report.collectSiteStats(site);
+        const st = report.collectSiteStats(site, { createDir: false });
         return {
           site: st.site,
           displayName: st.meta.displayName,
