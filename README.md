@@ -22,7 +22,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 ## 环境要求
 
 - Node.js（建议 18+）；容器运行需 Docker / Docker Compose
-- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`puppeteer-core`（`yfbzb` 走 `axios` 静态抓取，`ceb` 走 `puppeteer-core` + Alpine `chromium` 浏览器引擎绕过 WAF；宿主机无 `chromium` 时自动回退 `axios`）
+- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`http-proxy-agent`/`https-proxy-agent`（全站 `axios` 静态抓取，`ceb` 固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL` 代理换 IP，可选 `mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）
 
 安装依赖：
 
@@ -138,9 +138,9 @@ server {
 1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
-   - **站点策略**：`sites/yfbzb.js` 实站（`axios`）、`sites/ceb.js` 实站（`engine:'browser'` + `puppeteer-core`/`chromium`，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`engine` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
-   - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 因 `engine:'browser'` 强制串行（`batchSize:1` + `requestDelay 2500-5500ms`）。
-   - **逐页抓取**：`crawlPage()` 分两路：`axios`（每站 `timeout`/`headers`/`method` 可覆写，`yfbzb` 主路径）或 `browser`（`ceb`：`puppeteer-core` 拉起 `chromium`，`page.goto(domcontentloaded)` + `waitForSelector(table_text, 3s)` 取 `html` 再 `cheerio.load`，无 `chromium` 时回退 `axios`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST` 并计入重试，双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **站点策略**：`sites/yfbzb.js` 实站（`axios`）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`proxy` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
+   - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 因固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL`（`http-proxy-agent/https-proxy-agent`，`NO_PROXY` 白名单）代理换 IP（`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST` 并计入重试，双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷（代理下 405 仍触发熔断）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
    - **终止条件**（三者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到 `totalPages`（CLI 页数边界）
@@ -184,7 +184,7 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站 `engine:'browser'` 串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断，配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + 代理换 IP（`HTTP_PROXY/CEB_PROXY_URL`），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 
@@ -199,11 +199,11 @@ crawler/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/getSiteConfigs(sites)/parseSitesList()/listEnabledSites()
 │   ├── _base.js          # 默认策略：defaultBuildUrl/defaultParse/defaultExtractId/defaultIsBoundary
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
-│   ├── ceb.js            # 实站配置：engine:'browser'/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl（puppeteer 真实渲染）
+│   ├── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
 │   ├── demo.js           # 策略示例：buildUrl/parse/isBoundary/batchSize 等钩子示例
 │   └── site2.js          # 占位骨架：baseUrl 为空，fail-fast
-├── Dockerfile            # node:20-alpine + tzdata + chromium/nss + TZ=Asia/Shanghai + PUPPETEER_EXECUTABLE_PATH + EXPOSE 8080
-├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck + mem 800m），bind mount file/logs
+├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
+├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck + mem 400m，HTTP_PROXY 可选），bind mount file/logs
 ├── .dockerignore
 ├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
@@ -224,7 +224,7 @@ crawler/
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
-- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已切 `puppeteer-core` + `chromium` 真实渲染应对（镜像 +~150MB，`mem_limit 800m`）；其余 `axios` 站点届时可按需增 `engine:'browser'`，不全局引入。
-- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销；`ceb` 浏览器引擎下探针统计与报告与 `yfbzb` 一致。
+- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已切代理换 IP 应对（`HTTP_PROXY/CEB_PROXY_URL` 经 `mihomo` sidecar，可按需启用，不增镜像体积）；其余站点直连，届时可按需单站代理。
+- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,site2` 在多站点模式下占位站点 warn 跳过。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

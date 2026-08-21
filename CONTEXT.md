@@ -10,7 +10,7 @@
 
 | 术语 | 含义 | 关联代码 |
 |------|------|----------|
-| **站点 (Site)** | 一个抓取目标，由 `sites/<site>.js` 的 `{ name, displayName, description, originUrl, baseUrl, urlSuffix, selectors, linkPrefix, buildUrl, parse, extractId, isBoundary, batchSize, timeout, headers, engine, requestDelay, fallbackOn405 }` 定义（后者为可选策略钩子，默认值见 `sites/_base.js`；`engine` 可选 `axios`（默认，如 `yfbzb`）/`browser`（`ceb`：`puppeteer-core`+`chromium` 真实渲染绕过 WAF 405，`PUPPETEER_EXECUTABLE_PATH`，无 `chromium` 回退 `axios`）；`displayName`/`description`/`originUrl` 供总导航卡片展示）；通过 `SITES`（逗号分隔并发）或 `SITE`/`CRAWLER_SITE` 选择，`SITES` 下未实现站点 warn 跳过、单站点下 fail-fast。 | `sites/index.js#getSiteConfig`, `sites/yfbzb.js`, `sites/ceb.js`, `sites/demo.js`, `sites/_base.js` |
+| **站点 (Site)** | 一个抓取目标，由 `sites/<site>.js` 的 `{ name, displayName, description, originUrl, baseUrl, urlSuffix, selectors, linkPrefix, buildUrl, parse, extractId, isBoundary, batchSize, timeout, headers, proxy, requestDelay, fallbackOn405 }` 定义（后者为可选策略钩子，默认值见 `sites/_base.js`；全站 `axios`，`ceb` 固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL` 代理换 IP（`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）；`displayName`/`description`/`originUrl` 供总导航卡片展示）；通过 `SITES`（逗号分隔并发）或 `SITE`/`CRAWLER_SITE` 选择，`SITES` 下未实现站点 warn 跳过、单站点下 fail-fast。 | `sites/index.js#getSiteConfig`, `sites/yfbzb.js`, `sites/ceb.js`, `sites/demo.js`, `sites/_base.js` |
 | **站点注册表 (Site Registry)** | `sites/index.js` 的 `registry` 与 `normalizeSite()`/`normalizeSites()`/`parseSitesList()`/`getSiteConfigs()`/`listSites()`/`listEnabledSites()`，集中校验与枚举站点；支持 `SITES` 多值与每站 `CRON_<SITE>`/`TOTAL_PAGES_<SITE>`/`SITES_CONFIG`。 | `sites/index.js` |
 | **公告 (Notice)** | 单条招标条目，字段 `id`（`link` 末段去扩展名）、`title`、`link`、`noticeType`、`area`、`publishTime`。 | `crawler.js#crawlPage` |
 | **选择器 (Selectors)** | 站点相关的 Cheerio 选择器 `rows/titleLink/noticeType/area/publishTime`，默认 `#treeTable tbody tr` 等，随站点配置可覆写；或由站点 `parse($, html, existingIds, siteConfig)` 完全接管（JSON API 等）。 | `sites/<site>.js#selectors`, `sites/_base.js#defaultParse` |
@@ -29,7 +29,7 @@
 
 ## 非目标/排除
 
-- 默认不做浏览器渲染抓取（`yfbzb` 纯 `axios`）；`ceb` 因 WAF 固定 IP 无法换而例外切 `engine:'browser'`（`puppeteer-core` + Alpine `chromium`，体积 +~150MB 已确认，宿主机无 `chromium` 回退 `axios`）。
+- 全站 `axios` 静态抓取；`ceb` 因 WAF 固定 IP 被拦时经代理换 IP（`HTTP_PROXY/CEB_PROXY_URL` 经 `http-proxy-agent/https-proxy-agent` 注入，`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`），未配时代理直连。
 - `CRON_EXPR` 仅支持 `m h * * *`（如 `0 2 * * *`），复杂表达式需另引 cron 库。
 - 旧扁平 `file/*.xlsx` 不迁移，仅新站点走 `file/<site>/`。
 
