@@ -130,13 +130,12 @@ function validateInput(input) {
       try {
         nextCronDelay(cron);
       } catch (e) {
-        console.error(`站点 [${site}] CRON 无效: ${e.message}（仅支持 "m h * * *" 格式，例如 "0 2 * * *"）`);
-        if (process.env[`CRON_${site.toUpperCase()}`] || process.env[`CRON_EXPR_${site.toUpperCase()}`]) {
-          process.exit(1);
-        } else if (globalCron) {
-          console.error(`CRON_EXPR 无效: ${e.message}（仅支持 "m h * * *" 格式，例如 "0 2 * * *"）`);
-          process.exit(1);
+        console.error(`站点 [${site}] CRON 无效: ${e.message}（例如 "0 2 * * *" 每天02:00，"10,40 * * * *" 每小时10/40分）`);
+        // 任何来源的非法 cron 均需 fail-fast（包括 SITES_CONFIG），避免静默放行后运行时崩溃
+        if (cron === globalCron) {
+          console.error(`CRON_EXPR 无效: ${e.message}（例如 "0 2 * * *" 每天02:00，"10,40 * * * *" 每小时10/40分）`);
         }
+        process.exit(1);
       }
     }
   }
@@ -146,28 +145,94 @@ function getRandomDelay(minSeconds, maxSeconds) {
   return Math.floor(Math.random() * (maxSeconds - minSeconds + 1) + minSeconds) * 1000;
 }
 
-// 极简 cron：仅支持 "m h * * *"（每天固定时分），满足 "0 2 * * *" 场景。
+// 标准 5 段 cron：分 时 日 月 周，支持 *, 逗号, 区间, 步长（如 "10,40 * * * *" 每小时10/40分，"0 2 * * *" 每天02:00，"*/15 * * * *" 每15分钟）
+// 时区固定为 Asia/Shanghai（与 TZ 环境一致）
 function nextCronDelay(cronExpr) {
-  const parts = cronExpr.trim().split(/\s+/);
+  // 兼容 "10, 40 * * * *" 这类逗号后带空格的写法
+  const normalizedExpr = cronExpr.trim().replace(/\s*,\s*/g, ',');
+  const parts = normalizedExpr.split(/\s+/);
   if (parts.length !== 5) throw new Error(`cron 需 5 段， got ${parts.length}`);
-  const [minStr, hourStr, dom, mon, dow] = parts;
-  if (dom !== '*' || mon !== '*' || dow !== '*') {
-    throw new Error('仅支持 "m h * * *"（后三段需为 *）');
+  const [minStr, hourStr, domStr, monStr, dowStr] = parts;
+
+  function parseField(field, min, max, name) {
+    const values = new Set();
+    const isStar = field === '*';
+    if (isStar) {
+      for (let i = min; i <= max; i++) values.add(i);
+      return { values, isStar: true };
+    }
+    const segments = field.split(',').map(s => s.trim());
+    for (let seg of segments) {
+      if (!seg) throw new Error(`${name} 字段含空段 "${field}"`);
+      let rangePart = seg;
+      let step = 1;
+      if (seg.includes('/')) {
+        const idx = seg.indexOf('/');
+        rangePart = seg.slice(0, idx).trim();
+        const stepStr = seg.slice(idx + 1).trim();
+        if (!/^\d+$/.test(stepStr)) throw new Error(`${name} 步长需正整数，got "${seg}"`);
+        step = parseInt(stepStr, 10);
+        if (step <= 0) throw new Error(`${name} 步长需正整数，got "${seg}"`);
+        if (!rangePart) throw new Error(`${name} 字段格式错误 "${seg}"`);
+      }
+      rangePart = rangePart.trim();
+      let start; let end;
+      if (rangePart === '*') {
+        start = min; end = max;
+      } else if (rangePart.includes('-')) {
+        const [aRaw, bRaw] = rangePart.split('-');
+        const a = aRaw.trim(); const b = bRaw.trim();
+        if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) throw new Error(`${name} 区间需数字，got "${seg}"`);
+        start = parseInt(a, 10); end = parseInt(b, 10);
+        if (start < min || end > max || start > end) throw new Error(`${name} 需 ${min}-${max}，got "${seg}"`);
+      } else {
+        if (!/^\d+$/.test(rangePart)) throw new Error(`${name} 需数字或 *，got "${seg}"`);
+        const v = parseInt(rangePart, 10);
+        if (v < min || v > max) throw new Error(`${name} 需 ${min}-${max}，got "${seg}"`);
+        if (seg.includes('/')) { start = v; end = max; } else { start = v; end = v; }
+      }
+      for (let v = start; v <= end; v += step) values.add(v);
+    }
+    if (values.size === 0) throw new Error(`${name} 字段无有效值 "${field}"`);
+    return { values, isStar: false };
   }
-  if (!/^\d+$/.test(minStr)) throw new Error(`分钟需 0-59，got "${minStr}"`);
-  if (!/^\d+$/.test(hourStr)) throw new Error(`小时需 0-23，got "${hourStr}"`);
-  const minute = parseInt(minStr, 10);
-  const hour = parseInt(hourStr, 10);
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) throw new Error(`分钟需 0-59，got "${minStr}"`);
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) throw new Error(`小时需 0-23，got "${hourStr}"`);
+
+  const minF = parseField(minStr, 0, 59, '分钟');
+  const hourF = parseField(hourStr, 0, 23, '小时');
+  const domF = parseField(domStr, 1, 31, '日');
+  const monF = parseField(monStr, 1, 12, '月');
+  const dowF = parseField(dowStr, 0, 7, '周');
+  // 周日的 7 别名归一到 0
+  if (dowF.values.has(7)) { dowF.values.delete(7); dowF.values.add(0); }
+
   const nowMs = Date.now();
-  const shanghaiNow = new Date(nowMs + 8 * 3600000);
-  const y = shanghaiNow.getUTCFullYear();
-  const mo = shanghaiNow.getUTCMonth();
-  const d = shanghaiNow.getUTCDate();
-  let nextMs = Date.UTC(y, mo, d, hour, minute, 0, 0) - 8 * 3600000;
-  if (nextMs < nowMs) nextMs += 86400000;
-  return nextMs - nowMs;
+  const shanghaiNowMs = nowMs + 8 * 3600000;
+  // 对齐到分钟起点：若刚好在整分则立即匹配（与旧 daily 逻辑一致，delay=0），否则取下一分钟
+  let candidateMs = shanghaiNowMs - (shanghaiNowMs % 60000);
+  if (candidateMs < shanghaiNowMs) candidateMs += 60000;
+  // 上限 4 年逐分钟扫描，覆盖闰年 2-29（"0 0 29 2 *" 距今约 1461 天）；非法日期如 2-30 仍会在穷尽后抛错
+  const limit = candidateMs + 1461 * 24 * 60 * 60000;
+  for (let t = candidateMs; t < limit; t += 60000) {
+    const d = new Date(t);
+    const minute = d.getUTCMinutes();
+    const hour = d.getUTCHours();
+    const dom = d.getUTCDate();
+    const mon = d.getUTCMonth() + 1;
+    const dow = d.getUTCDay();
+    if (!minF.values.has(minute)) continue;
+    if (!hourF.values.has(hour)) continue;
+    if (!monF.values.has(mon)) continue;
+    const domMatch = domF.values.has(dom);
+    const dowMatch = dowF.values.has(dow);
+    let dayMatch;
+    if (domF.isStar && dowF.isStar) dayMatch = true;
+    else if (domF.isStar) dayMatch = dowMatch;
+    else if (dowF.isStar) dayMatch = domMatch;
+    else dayMatch = domMatch || dowMatch;
+    if (!dayMatch) continue;
+    return t - shanghaiNowMs;
+  }
+  throw new Error(`cron "${cronExpr}" 在 1461 天内无匹配时间`);
 }
 
 async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDelay, cronExpr }) {
@@ -204,7 +269,15 @@ async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDe
 
   // 定时常驻：每站独立循环
   while (!isStopping()) {
-    const delayMs = nextCronDelay(cronExpr);
+    let delayMs;
+    try {
+      delayMs = nextCronDelay(cronExpr);
+    } catch (e) {
+      log(`站点 [${siteNorm}] CRON 运行时错误: ${e.message}（CRON="${cronExpr}"），60秒后重试`, { level: 'error', event: 'cron_runtime_error', context: { site: siteNorm, cronExpr, error: e.message }, site: siteNorm });
+      const slept = await sleepInterruptible(60000);
+      if (!slept || isStopping()) break;
+      continue;
+    }
     const nextAt = new Date(Date.now() + delayMs);
     log(`站点 [${siteNorm}] 下次运行于 ${nextAt.toLocaleString('zh-CN', { hour12: false })}（${(delayMs / 1000 / 60).toFixed(1)} 分钟后，CRON="${cronExpr}"）`, { event: 'schedule_next', context: { site: siteNorm, cronExpr, delayMs, nextAt: nextAt.toISOString() }, site: siteNorm });
     const slept = await sleepInterruptible(delayMs);
