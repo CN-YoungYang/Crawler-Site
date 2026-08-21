@@ -19,6 +19,10 @@ const BACKOFF_CAP_MS = 60000;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// 浏览器引擎单例（ceb 根治 WAF）：puppeteer-core + Alpine chromium
+let browserInstance = null;
+let browserLaunchPromise = null;
+
 // 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
 function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
   return new Date(nowMs + 8 * 3600000 + offsetDays * 86400000).toISOString().slice(0, 10);
@@ -68,6 +72,81 @@ function backoffDelay(attempt, base = BACKOFF_BASE_MS, cap = BACKOFF_CAP_MS) {
   const exp = base * Math.pow(2, attempt);
   const capped = Math.min(exp, cap);
   return Math.floor(Math.random() * capped);
+}
+
+// ---- 浏览器引擎（ceb 根治） ----
+async function getBrowser() {
+  if (browserInstance) return browserInstance;
+  if (browserLaunchPromise) return browserLaunchPromise;
+  browserLaunchPromise = (async () => {
+    let puppeteer;
+    try {
+      puppeteer = require('puppeteer-core');
+    } catch (e) {
+      throw new Error(`puppeteer-core 未安装: ${e.message}`);
+    }
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
+    const launchOpts = {
+      executablePath,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process'],
+      headless: 'new'
+    };
+    // 容器内 Alpine chromium 需 --no-sandbox
+    browserInstance = await puppeteer.launch(launchOpts);
+    // 退出时清理
+    const close = async () => { try { if (browserInstance) await browserInstance.close(); } catch (_) {} };
+    process.once('exit', close);
+    process.once('SIGINT', close);
+    process.once('SIGTERM', close);
+    return browserInstance;
+  })();
+  try {
+    return await browserLaunchPromise;
+  } catch (e) {
+    browserLaunchPromise = null;
+    throw e;
+  }
+}
+
+async function closeBrowser() {
+  if (browserLaunchPromise) try { await browserLaunchPromise; } catch (_) {}
+  if (browserInstance) {
+    try { await browserInstance.close(); } catch (_) {}
+    browserInstance = null;
+    browserLaunchPromise = null;
+  }
+}
+
+async function fetchWithBrowser(url, siteConfig) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setViewport({ width: 1280, height: 800 });
+    // 真实 UA 与站点一致
+    const ua = (siteConfig.headers && siteConfig.headers['User-Agent']) || USER_AGENT;
+    await page.setUserAgent(ua);
+    // 超时与 siteConfig.timeout 保持一致
+    const timeout = siteConfig.timeout ?? REQUEST_TIMEOUT;
+    page.setDefaultNavigationTimeout(timeout);
+    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    const status = resp ? resp.status() : 200;
+    if (status === 403 || status === 405) {
+      const err = new Error(`Request failed with status code ${status}`);
+      err.response = { status, data: await page.content().catch(() => '') };
+      throw err;
+    }
+    if (status < 200 || status >= 300) {
+      const err = new Error(`Request failed with status code ${status}`);
+      err.response = { status, data: await page.content().catch(() => '') };
+      throw err;
+    }
+    // 等待表格出现，最多 3s，提升稳定性
+    try { await page.waitForSelector('table.table_text', { timeout: 3000 }); } catch (_) {}
+    const html = await page.content();
+    return html;
+  } finally {
+    try { await page.close(); } catch (_) {}
+  }
 }
 
 function resolveSiteConfig(siteOrConfig) {
@@ -138,6 +217,54 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   while (retries < maxRetries) {
     try {
       await maybeThrottle();
+      // ---- 浏览器引擎（ceb 根治 WAF）：puppeteer 真实渲染 ----
+      if (siteConfig.engine === 'browser') {
+        try {
+          let html;
+          try {
+            html = await fetchWithBrowser(url, siteConfig);
+          } catch (e) {
+            // 测试环境无 chromium 时回退到 axios，避免套件失败
+            if (e.message && e.message.includes('puppeteer')) {
+              log(`浏览器引擎启动失败，回退到 axios：${e.message}`, { level: 'warn', event: 'browser_fallback', context: { page: pageNo, site: siteName }, site: siteName });
+              siteConfig = { ...siteConfig, engine: undefined };
+              continue;
+            }
+            throw e;
+          }
+          if (typeof siteConfig.parse === 'function') {
+            const pageData = await siteConfig.parse(cheerio.load(html), html, existingIds, siteConfig);
+            const filtered = Array.isArray(pageData) ? pageData.filter(item => !existingIds.has(item.id)) : [];
+            log(`爬取完成第 ${pageNo} 页，共找到 ${filtered.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: filtered.length, site: siteName }, site: siteName });
+            return { pageData: filtered, failed: false };
+          }
+          const $ = cheerio.load(html);
+          const selectors = siteConfig.selectors || require('./sites/yfbzb').selectors;
+          const rows = $(selectors.rows);
+          if (rows.length === 0) {
+            log(`第 ${pageNo} 页没有找到任何数据`, { event: 'page_empty', context: { page: pageNo, site: siteName }, site: siteName });
+            return { pageData: [], failed: false };
+          }
+          const pageData = defaultParse($, html, existingIds, { ...siteConfig, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
+          log(`爬取完成第 ${pageNo} 页，共找到 ${pageData.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: pageData.length, site: siteName }, site: siteName });
+          return { pageData, failed: false };
+        } catch (error) {
+          if (isBoundary(error, siteConfig)) {
+            log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
+            return { pageData: [], failed: false, endReached: true };
+          }
+          const errStatus = error.response?.status;
+          retries++;
+          const backoff = backoffDelay(retries - 1);
+          log(`第 ${pageNo} 页加载失败 [browser status=${errStatus}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, status: errStatus, site: siteName }, site: siteName });
+          if (retries === maxRetries) {
+            log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [browser status=${errStatus}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, status: errStatus, site: siteName }, site: siteName });
+            return { pageData: [], failed: true, status: errStatus };
+          }
+          await new Promise(resolve => setTimeout(resolve, backoff));
+          continue;
+        }
+      }
       let response;
       if (method === 'POST') {
         // 用 URL API 稳健切分，避免手工 indexOf 误伤 hash/空查询
@@ -519,6 +646,11 @@ async function crawl(a, b, c, d) {
     for (const id of failedIds) existingIds.delete(id);
   }
 
+  // 浏览器引擎收尾
+  if (siteConfig.engine === 'browser') {
+    try { await closeBrowser(); } catch (_) {}
+  }
+
   if (stoppedBySignal) {
     saveCheckpoint(site, currentPage, existingIds);
     log(`已优雅退出，checkpoint 已保存（起始页 ${currentPage}），下次将续跑`, { level: 'warn', event: 'graceful_exit', context: { currentPage, site }, site });
@@ -557,4 +689,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, closeBrowser, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };

@@ -27,10 +27,10 @@ services:
       retries: 3
       start_period: 15s
 
-    # 1C1G / 低配机优化（参考 rust-migration）
-    mem_limit: 300m
-    mem_reservation: 150m
-    cpus: '0.8'
+    # 1C1G / 低配机优化（ceb 需 chromium，适当放宽）
+    mem_limit: 800m
+    mem_reservation: 300m
+    cpus: '1.0'
 
     logging:
       driver: "json-file"

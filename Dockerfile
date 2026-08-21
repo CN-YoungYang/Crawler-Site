@@ -1,11 +1,13 @@
 FROM node:20-alpine
 
 # 时区：容器内 Date 需与北京时间一致，否则 readRecentIds / publishTime 分区错一天
-RUN apk add --no-cache tzdata su-exec && \
+# ceb 需无头浏览器绕过 WAF：安装 chromium 供 puppeteer-core 使用（体积 +~150MB，用户已确认接受）
+RUN apk add --no-cache tzdata chromium nss freetype harfbuzz ca-certificates ttf-freefont su-exec && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone
 
 ENV TZ=Asia/Shanghai
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 WORKDIR /app
 
