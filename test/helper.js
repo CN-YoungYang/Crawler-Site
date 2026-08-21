@@ -9,6 +9,7 @@ const CRAWLER_PATH = require('path').resolve(__dirname, '..', 'crawler.js');
 
 function mockAxios(handler) {
   // handler: (url, config) => { data, status } | throws (网络错误则抛 axios 风格对象)
+  // 支持 axios.get(url, config) / axios.post(url, data, config) / axios({url, ...})
   const fake = (url, config) => {
     if (typeof url === 'object') {
       // axios({url, ...}) 调用形式
@@ -18,6 +19,11 @@ function mockAxios(handler) {
     return handler(url, config);
   };
   fake.get = (url, config) => handler(url, config);
+  fake.post = (url, data, config) => {
+    const merged = { ...(config || {}), data };
+    return handler(url, merged);
+  };
+  fake.request = (config) => handler(config.url, config);
   fake.create = () => fake;
   // 覆盖 require.cache
   const original = require.cache[AXIOS_PATH];

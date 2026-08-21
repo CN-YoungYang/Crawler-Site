@@ -109,7 +109,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   const isBoundary = siteConfig.isBoundary || defaultIsBoundary;
   const linkPrefix = siteConfig.linkPrefix || '';
   const timeout = siteConfig.timeout ?? REQUEST_TIMEOUT;
-  const headers = siteConfig.headers || { 'User-Agent': USER_AGENT };
+  // 合并默认 UA，避免站点仅覆写部分头时丢失 UA 被 WAF 拦截
+  const headers = { 'User-Agent': USER_AGENT, ...(siteConfig.headers || {}) };
 
   // 策略化 URL 构建
   const url = typeof siteConfig.buildUrl === 'function'
@@ -117,8 +118,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     : defaultBuildUrl(pageNo, siteConfig);
 
   let retries = 0;
-  // 方法容错：默认 GET，405 时可降级为 POST（ceb WAF 场景）
-  let method = (siteConfig.method || 'GET').toUpperCase();
+  // 方法容错：仅显式开启 fallbackOn405 的站点才降级（如 ceb），避免 yfbzb 等 GET 站点误发 POST
+  let method = String(siteConfig.method || 'GET').toUpperCase();
   let triedFallback = false;
 
   // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
@@ -139,11 +140,29 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       await maybeThrottle();
       let response;
       if (method === 'POST') {
-        const qIdx = url.indexOf('?');
-        const base = qIdx >= 0 ? url.slice(0, qIdx) : url;
-        const query = qIdx >= 0 ? url.slice(qIdx + 1) : '';
-        const postHeaders = { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' };
-        response = await axios.post(base, query, { timeout, headers: postHeaders });
+        // 用 URL API 稳健切分，避免手工 indexOf 误伤 hash/空查询
+        let base = url;
+        let query = '';
+        try {
+          const u = new URL(url);
+          base = `${u.protocol}//${u.host}${u.pathname}`;
+          query = u.search ? u.search.slice(1) : '';
+          // hash 不应作为表单字段发送，已被 URL 丢弃
+        } catch (_) {
+          const qIdx = url.indexOf('?');
+          base = qIdx >= 0 ? url.slice(0, qIdx).split('#')[0] : url.split('#')[0];
+          query = qIdx >= 0 ? url.slice(qIdx + 1).split('#')[0] : '';
+        }
+        if (!query) {
+          // 无 query 时不强制发空表单，避免必填参数丢失；回退为 GET 语义
+          response = await axios.get(url, { timeout, headers });
+        } else {
+          const postHeaders = { ...headers };
+          // 尊重站点已声明的 Content-Type，仅在未声明时默认 form
+          const hasCT = Object.keys(postHeaders).some(k => k.toLowerCase() === 'content-type');
+          if (!hasCT) postHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+          response = await axios.post(base, query, { timeout, headers: postHeaders });
+        }
       } else {
         response = await axios.get(url, { timeout, headers });
       }
@@ -175,18 +194,33 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
         return { pageData: [], failed: false, endReached: true };
       }
-      // 405 自动降级：GET 被 WAF 拒时切 POST 重试一次（不计入重试次数）
       const errStatus = error.response?.status;
-      if (errStatus === 405 && method === 'GET' && !triedFallback && siteConfig.fallbackOn405 !== false) {
-        triedFallback = true;
-        method = 'POST';
-        const snippet = String(error.response?.data || '').slice(0, 300).replace(/\s+/g, ' ').trim();
-        log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
-        continue;
+      // 405 自动降级：仅显式开启 fallbackOn405 的站点（如 ceb）才切 POST，且计入重试并退避，避免突破 maxRetries
+      function formatSnippet(data) {
+        if (data == null) return '';
+        if (Buffer.isBuffer(data)) return data.toString('utf8').slice(0, 300);
+        if (typeof data === 'object') {
+          try { return JSON.stringify(data).slice(0, 300); } catch (_) { return String(data).slice(0, 300); }
+        }
+        return String(data).slice(0, 300);
+      }
+      if (errStatus === 405 && method === 'GET' && !triedFallback && siteConfig.fallbackOn405) {
+        if (retries >= maxRetries) {
+          // 已无重试额度，回落为普通失败路径
+        } else {
+          triedFallback = true;
+          method = 'POST';
+          const snippet = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
+          log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
+          const backoff = backoffDelay(retries);
+          retries++;
+          await new Promise(resolve => setTimeout(resolve, backoff));
+          continue;
+        }
       }
       retries++;
       const backoff = backoffDelay(retries - 1);
-      const snippet405 = errStatus === 405 ? String(error.response?.data || '').slice(0, 200).replace(/\s+/g, ' ').trim() : '';
+      const snippet405 = errStatus === 405 ? formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim() : '';
       const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries === maxRetries) {
