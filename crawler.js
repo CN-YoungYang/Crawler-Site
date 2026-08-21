@@ -19,9 +19,76 @@ const BACKOFF_CAP_MS = 60000;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-// 浏览器引擎单例（ceb 根治 WAF）：puppeteer-core + Alpine chromium
-let browserInstance = null;
-let browserLaunchPromise = null;
+// ---- 代理（ceb 换 IP 绕过 WAF，轻量替代浏览器引擎） ----
+// 优先级：PROXY_<SITE> / <SITE>_PROXY_URL > PROXY_URL > HTTPS_PROXY/HTTP_PROXY > siteConfig.proxyUrl
+// 值形如 http://127.0.0.1:7890 或 http://user:pass@host:port；NO_PROXY 直连白名单
+function desensitizeProxyUrl(url) {
+  if (!url) return '';
+  try {
+    const u = new URL(url);
+    if (u.username || u.password) {
+      const auth = '***:***';
+      return `${u.protocol}//${auth}@${u.host}${u.pathname}${u.search}${u.hash}`;
+    }
+    return url;
+  } catch (_) { return url.replace(/:\/\/[^@]+@/, '://***:***@'); }
+}
+
+function isNoProxy(targetUrl, siteConfig) {
+  const raw = (siteConfig && siteConfig.noProxy) || process.env.NO_PROXY || process.env.no_proxy || '';
+  if (!raw || !raw.trim()) return false;
+  let hostname = '';
+  try { hostname = new URL(targetUrl).hostname.toLowerCase(); } catch (_) { return false; }
+  const list = raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  for (const entry of list) {
+    const pat = entry.replace(/^\./, '');
+    if (!pat) continue;
+    if (pat === '*' || hostname === pat || hostname.endsWith(`.${pat}`) || hostname.endsWith(pat)) return true;
+  }
+  return false;
+}
+
+function resolveProxyUrl(siteConfig) {
+  if (siteConfig && siteConfig.proxy === false) return '';
+  const site = String((siteConfig && siteConfig.name) || '').toUpperCase();
+  const candidates = [];
+  if (site) {
+    if (process.env[`PROXY_${site}`]) candidates.push(process.env[`PROXY_${site}`]);
+    if (process.env[`${site}_PROXY_URL`]) candidates.push(process.env[`${site}_PROXY_URL`]);
+    if (process.env[`${site}_PROXY`]) candidates.push(process.env[`${site}_PROXY`]);
+  }
+  if (process.env.PROXY_URL) candidates.push(process.env.PROXY_URL);
+  if (process.env.HTTPS_PROXY) candidates.push(process.env.HTTPS_PROXY);
+  if (process.env.HTTP_PROXY) candidates.push(process.env.HTTP_PROXY);
+  if (process.env.https_proxy) candidates.push(process.env.https_proxy);
+  if (process.env.http_proxy) candidates.push(process.env.http_proxy);
+  if (siteConfig && siteConfig.proxyUrl) candidates.push(siteConfig.proxyUrl);
+  if (siteConfig && typeof siteConfig.proxy === 'string' && siteConfig.proxy) candidates.push(siteConfig.proxy);
+  const raw = candidates.find(v => typeof v === 'string' && v.trim());
+  return raw ? raw.trim() : '';
+}
+
+function getProxyAgents(siteConfig, targetUrl) {
+  const proxyUrl = resolveProxyUrl(siteConfig);
+  if (!proxyUrl) return null;
+  if (targetUrl && isNoProxy(targetUrl, siteConfig)) return null;
+  try { new URL(proxyUrl); } catch (e) {
+    log(`代理地址无效，已回退直连：${desensitizeProxyUrl(proxyUrl)} (${e.message})`, { level: 'warn', event: 'proxy_invalid', context: { proxy: desensitizeProxyUrl(proxyUrl), site: (siteConfig && siteConfig.name) || '' }, site: (siteConfig && siteConfig.name) || '' });
+    return null;
+  }
+  try {
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    const { HttpProxyAgent } = require('http-proxy-agent');
+    return {
+      proxyUrl,
+      httpAgent: new HttpProxyAgent(proxyUrl),
+      httpsAgent: new HttpsProxyAgent(proxyUrl)
+    };
+  } catch (e) {
+    log(`代理组件加载失败，已回退直连：${e.message}`, { level: 'warn', event: 'proxy_agent_failed', context: { error: e.message, site: (siteConfig && siteConfig.name) || '' }, site: (siteConfig && siteConfig.name) || '' });
+    return null;
+  }
+}
 
 // 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
 function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
@@ -72,81 +139,6 @@ function backoffDelay(attempt, base = BACKOFF_BASE_MS, cap = BACKOFF_CAP_MS) {
   const exp = base * Math.pow(2, attempt);
   const capped = Math.min(exp, cap);
   return Math.floor(Math.random() * capped);
-}
-
-// ---- 浏览器引擎（ceb 根治） ----
-async function getBrowser() {
-  if (browserInstance) return browserInstance;
-  if (browserLaunchPromise) return browserLaunchPromise;
-  browserLaunchPromise = (async () => {
-    let puppeteer;
-    try {
-      puppeteer = require('puppeteer-core');
-    } catch (e) {
-      throw new Error(`puppeteer-core 未安装: ${e.message}`);
-    }
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
-    const launchOpts = {
-      executablePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process'],
-      headless: 'new'
-    };
-    // 容器内 Alpine chromium 需 --no-sandbox
-    browserInstance = await puppeteer.launch(launchOpts);
-    // 退出时清理
-    const close = async () => { try { if (browserInstance) await browserInstance.close(); } catch (_) {} };
-    process.once('exit', close);
-    process.once('SIGINT', close);
-    process.once('SIGTERM', close);
-    return browserInstance;
-  })();
-  try {
-    return await browserLaunchPromise;
-  } catch (e) {
-    browserLaunchPromise = null;
-    throw e;
-  }
-}
-
-async function closeBrowser() {
-  if (browserLaunchPromise) try { await browserLaunchPromise; } catch (_) {}
-  if (browserInstance) {
-    try { await browserInstance.close(); } catch (_) {}
-    browserInstance = null;
-    browserLaunchPromise = null;
-  }
-}
-
-async function fetchWithBrowser(url, siteConfig) {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-  try {
-    await page.setViewport({ width: 1280, height: 800 });
-    // 真实 UA 与站点一致
-    const ua = (siteConfig.headers && siteConfig.headers['User-Agent']) || USER_AGENT;
-    await page.setUserAgent(ua);
-    // 超时与 siteConfig.timeout 保持一致
-    const timeout = siteConfig.timeout ?? REQUEST_TIMEOUT;
-    page.setDefaultNavigationTimeout(timeout);
-    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    const status = resp ? resp.status() : 200;
-    if (status === 403 || status === 405) {
-      const err = new Error(`Request failed with status code ${status}`);
-      err.response = { status, data: await page.content().catch(() => '') };
-      throw err;
-    }
-    if (status < 200 || status >= 300) {
-      const err = new Error(`Request failed with status code ${status}`);
-      err.response = { status, data: await page.content().catch(() => '') };
-      throw err;
-    }
-    // 等待表格出现，最多 3s，提升稳定性
-    try { await page.waitForSelector('table.table_text', { timeout: 3000 }); } catch (_) {}
-    const html = await page.content();
-    return html;
-  } finally {
-    try { await page.close(); } catch (_) {}
-  }
 }
 
 function resolveSiteConfig(siteOrConfig) {
@@ -217,54 +209,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   while (retries < maxRetries) {
     try {
       await maybeThrottle();
-      // ---- 浏览器引擎（ceb 根治 WAF）：puppeteer 真实渲染 ----
-      if (siteConfig.engine === 'browser') {
-        try {
-          let html;
-          try {
-            html = await fetchWithBrowser(url, siteConfig);
-          } catch (e) {
-            // 测试环境无 chromium 时回退到 axios，避免套件失败
-            if (e.message && e.message.includes('puppeteer')) {
-              log(`浏览器引擎启动失败，回退到 axios：${e.message}`, { level: 'warn', event: 'browser_fallback', context: { page: pageNo, site: siteName }, site: siteName });
-              siteConfig = { ...siteConfig, engine: undefined };
-              continue;
-            }
-            throw e;
-          }
-          if (typeof siteConfig.parse === 'function') {
-            const pageData = await siteConfig.parse(cheerio.load(html), html, existingIds, siteConfig);
-            const filtered = Array.isArray(pageData) ? pageData.filter(item => !existingIds.has(item.id)) : [];
-            log(`爬取完成第 ${pageNo} 页，共找到 ${filtered.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: filtered.length, site: siteName }, site: siteName });
-            return { pageData: filtered, failed: false };
-          }
-          const $ = cheerio.load(html);
-          const selectors = siteConfig.selectors || require('./sites/yfbzb').selectors;
-          const rows = $(selectors.rows);
-          if (rows.length === 0) {
-            log(`第 ${pageNo} 页没有找到任何数据`, { event: 'page_empty', context: { page: pageNo, site: siteName }, site: siteName });
-            return { pageData: [], failed: false };
-          }
-          const pageData = defaultParse($, html, existingIds, { ...siteConfig, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
-          log(`爬取完成第 ${pageNo} 页，共找到 ${pageData.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: pageData.length, site: siteName }, site: siteName });
-          return { pageData, failed: false };
-        } catch (error) {
-          if (isBoundary(error, siteConfig)) {
-            log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
-            return { pageData: [], failed: false, endReached: true };
-          }
-          const errStatus = error.response?.status;
-          retries++;
-          const backoff = backoffDelay(retries - 1);
-          log(`第 ${pageNo} 页加载失败 [browser status=${errStatus}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, status: errStatus, site: siteName }, site: siteName });
-          if (retries === maxRetries) {
-            log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [browser status=${errStatus}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, status: errStatus, site: siteName }, site: siteName });
-            return { pageData: [], failed: true, status: errStatus };
-          }
-          await new Promise(resolve => setTimeout(resolve, backoff));
-          continue;
-        }
-      }
+      const proxyAgents = getProxyAgents(siteConfig, url);
+      const axiosProxyOpts = proxyAgents ? { proxy: false, httpAgent: proxyAgents.httpAgent, httpsAgent: proxyAgents.httpsAgent } : {};
       let response;
       if (method === 'POST') {
         // 用 URL API 稳健切分，避免手工 indexOf 误伤 hash/空查询
@@ -282,16 +228,16 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         }
         if (!query) {
           // 无 query 时不强制发空表单，避免必填参数丢失；回退为 GET 语义
-          response = await axios.get(url, { timeout, headers });
+          response = await axios.get(url, { timeout, headers, ...axiosProxyOpts });
         } else {
           const postHeaders = { ...headers };
           // 尊重站点已声明的 Content-Type，仅在未声明时默认 form
           const hasCT = Object.keys(postHeaders).some(k => k.toLowerCase() === 'content-type');
           if (!hasCT) postHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
-          response = await axios.post(base, query, { timeout, headers: postHeaders });
+          response = await axios.post(base, query, { timeout, headers: postHeaders, ...axiosProxyOpts });
         }
       } else {
-        response = await axios.get(url, { timeout, headers });
+        response = await axios.get(url, { timeout, headers, ...axiosProxyOpts });
       }
 
       // 优先使用站点自定义 parse 接管整页解析
@@ -470,6 +416,18 @@ async function crawl(a, b, c, d) {
   const failureThreshold = siteConfig.failureThreshold ?? FAILURE_STOP_THRESHOLD;
   const startedAt = Date.now();
   log(`开始爬取 [${site}]，总页数：${totalPages}，间隔时间：${interval}毫秒`, { event: 'crawl_start', context: { site, totalPages, interval, maxRetries }, site });
+  // 代理状态（ceb 换 IP 绕过 WAF）：仅当解析到代理且非 NO_PROXY 时打印，便于排查
+  try {
+    const _proxyUrl = resolveProxyUrl(siteConfig);
+    if (_proxyUrl) {
+      const sampleUrl = typeof siteConfig.buildUrl === 'function' ? siteConfig.buildUrl.call(siteConfig, 1) : defaultBuildUrl(1, siteConfig);
+      if (!isNoProxy(sampleUrl, siteConfig)) {
+        log(`站点 [${site}] 已启用代理：${desensitizeProxyUrl(_proxyUrl)}`, { event: 'proxy_enabled', context: { site, proxy: desensitizeProxyUrl(_proxyUrl) }, site });
+      } else {
+        log(`站点 [${site}] 代理已配置但命中 NO_PROXY，直连`, { event: 'proxy_bypassed', context: { site, proxy: desensitizeProxyUrl(_proxyUrl) }, site });
+      }
+    }
+  } catch (_) {}
   const allData = {};
 
   const checkpoint = loadCheckpoint(site);
@@ -646,11 +604,6 @@ async function crawl(a, b, c, d) {
     for (const id of failedIds) existingIds.delete(id);
   }
 
-  // 浏览器引擎收尾
-  if (siteConfig.engine === 'browser') {
-    try { await closeBrowser(); } catch (_) {}
-  }
-
   if (stoppedBySignal) {
     saveCheckpoint(site, currentPage, existingIds);
     log(`已优雅退出，checkpoint 已保存（起始页 ${currentPage}），下次将续跑`, { level: 'warn', event: 'graceful_exit', context: { currentPage, site }, site });
@@ -689,4 +642,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, closeBrowser, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };

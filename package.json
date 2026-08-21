@@ -12,7 +12,8 @@
   "dependencies": {
     "axios": "^1.12.2",
     "cheerio": "^1.1.2",
-    "puppeteer-core": "^22.15.0",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.6",
     "xlsx": "^0.18.5"
   }
 }

@@ -147,11 +147,11 @@ module.exports = {
   timeout: 30000,
   // 发请求前随机抖动（crawler.js 识别此字段）
   requestDelay: { min: 2500, max: 5500 },
-  // 405 容错：GET 被 WAF 拒时自动降级为 POST（crawler.js 识别，browser 引擎下不生效）
+  // 405 容错：GET 被 WAF 拒时自动降级为 POST
   method: 'GET',
   fallbackOn405: true,
-  // 浏览器引擎：用 puppeteer 真实渲染绕过 WAF（甲骨文固定 IP 无法换，需此根治）
-  engine: 'browser',
+  // 代理换 IP 绕过 WAF（甲骨文固定 IP 被拦时设 HTTP_PROXY / CEB_PROXY_URL 走 mihomo sidecar）
+  // 例：HTTP_PROXY=http://127.0.0.1:7890 或 CEB_PROXY_URL=http://127.0.0.1:7890（mihomo 加载 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml）
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     // 精简指纹：移除 Sec-Fetch-* / Upgrade-Insecure-Requests，避免与 WAF 校验不一致触发 405

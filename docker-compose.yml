@@ -1,4 +1,17 @@
 services:
+  # 可选代理 sidecar：Oracle 固定 IP 被 ceb WAF 拦时，启用此服务将远端 clash_fast.yaml 转为本地 HTTP 代理
+  # 远端订阅由 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml（另一台机器定时更新）提供
+  # 启用方式：取消本段注释，准备 ./mihomo/config.yaml（cp mihomo/config.yaml.example），然后 compose up
+  # mihomo:
+  #   image: metacubex/mihomo:latest
+  #   container_name: mihomo
+  #   volumes:
+  #     - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
+  #   ports:
+  #     - "7890:7890"   # mixed-port，供 crawler 的 HTTP_PROXY=http://mihomo:7890 消费
+  #     - "9090:9090"   # external-controller，可选
+  #   restart: unless-stopped
+
   crawler:
     image: rxyoungyang/crawler:latest
     container_name: crawler
@@ -10,6 +23,15 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - HTTP_PORT=${HTTP_PORT:-8080}
       - HTTP_ENABLED=${HTTP_ENABLED:-true}
+      # 代理（可选，ceb 被封时启用其一）：
+      # - 全站：HTTP_PROXY=http://mihomo:7890 （需 mihomo sidecar 已启用）或宿主机 Clash http://host.docker.internal:7890
+      # - 单站：CEB_PROXY_URL=http://mihomo:7890 / PROXY_CEB=http://mihomo:7890
+      # - 白名单：NO_PROXY=localhost,127.0.0.1,yfbzb.com
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - PROXY_CEB=${PROXY_CEB:-}
+      - CEB_PROXY_URL=${CEB_PROXY_URL:-}
     ports:
       - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
     volumes:
@@ -19,6 +41,8 @@ services:
       # - ./state-yfbzb.json:/app/state-yfbzb.json
       # - ./state-ceb.json:/app/state-ceb.json
       # - ./state-site2.json:/app/state-site2.json
+      # 代理 sidecar 配置（启用 mihomo 时挂载）
+      # - ./mihomo/config.yaml:/app/mihomo-config.yaml:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
@@ -27,10 +51,10 @@ services:
       retries: 3
       start_period: 15s
 
-    # 1C1G / 低配机优化（ceb 需 chromium，适当放宽）
-    mem_limit: 800m
-    mem_reservation: 300m
-    cpus: '1.0'
+    # 轻量镜像（已移除 chromium），资源按需回调
+    mem_limit: 400m
+    mem_reservation: 150m
+    cpus: '0.5'
 
     logging:
       driver: "json-file"

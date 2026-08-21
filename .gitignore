@@ -8,6 +8,7 @@ yarn-error.log*
 file/
 logs/
 state*.json
+mihomo/config.yaml
 
 # 本地开发与临时文件
 .scratch/

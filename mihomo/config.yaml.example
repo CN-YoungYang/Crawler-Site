@@ -1,0 +1,58 @@
+# mihomo 配置示例（供 crawler 的 HTTP_PROXY=http://mihomo:7890 消费）
+# 启用方式：
+#   cp mihomo/config.yaml.example mihomo/config.yaml
+#   # 按需编辑下方远端订阅地址（另一台机器定时更新的 clash_fast.yaml）
+#   docker compose up -d --build   # 需先取消 docker-compose.yml 中 mihomo 段的注释
+#   curl http://127.0.0.1:7890/proxies  # 验证
+# 远端订阅：https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml（自建 NodeMergeClash 产出，E:\YoungYang\Git\NodeMergeClash）
+# 注意：xxx.xxx.xxx.xxx 为 IP 直连 https，证书为自签；若拉取失败可改为 http 或在前端加域名/Nginx 有效证书。
+
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+ipv6: false
+external-controller: "0.0.0.0:9090"
+secret: ""
+unified-delay: true
+tcp-concurrent: true
+keep-alive-interval: 30
+find-process-mode: strict
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+# 远端订阅（proxy-providers 动态拉取，自动更新）
+proxy-providers:
+  remote:
+    type: http
+    url: https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml
+    interval: 3600
+    path: ./remote.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 5000
+
+proxies:
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - auto
+      - DIRECT
+    use:
+      - remote
+  - name: auto
+    type: url-test
+    use:
+      - remote
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+
+rules:
+  - MATCH,PROXY
