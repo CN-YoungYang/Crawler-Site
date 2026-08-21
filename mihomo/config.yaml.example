@@ -6,7 +6,7 @@
 #   curl http://127.0.0.1:7890/proxies  # 验证
 # 远端订阅：https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml（自建 NodeMergeClash 产出，E:\YoungYang\Git\NodeMergeClash）
 # 注意：xxx.xxx.xxx.xxx 为 IP 直连 https，证书为自签；若拉取失败可改为 http 或在前端加域名/Nginx 有效证书。
-# 抓取效率：PROXY 为 fallback（失败即切），单页被 WAF 拦时毫秒级切下个可用节点，避免攒够 consecutive405 才触发熔断
+# 抓取效率：PROXY 为 select（crawler 侧单页双 405 时调 mihomo 9090 API 秒级切节点），避免攒够 consecutive405 才触发熔断
 
 mixed-port: 7890
 allow-lan: true
@@ -42,11 +42,12 @@ proxies:
 
 proxy-groups:
   - name: PROXY
-    type: fallback
+    type: select
     use:
       - remote
-    url: https://www.gstatic.com/generate_204
-    interval: 60
+    proxies:
+      - auto
+      - DIRECT
   - name: auto
     type: url-test
     use:

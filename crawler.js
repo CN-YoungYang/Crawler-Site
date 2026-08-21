@@ -26,12 +26,17 @@ function desensitizeProxyUrl(url) {
   if (!url) return '';
   try {
     const u = new URL(url);
-    if (u.username || u.password) {
-      const auth = '***:***';
-      return `${u.protocol}//${auth}@${u.host}${u.pathname}${u.search}${u.hash}`;
+    const hasAuth = !!(u.username || u.password);
+    const hasQuery = !!u.search;
+    const hasHash = !!u.hash;
+    if (hasAuth || hasQuery || hasHash) {
+      const auth = hasAuth ? '***:***@' : '';
+      const q = hasQuery ? '?***' : '';
+      const h = hasHash ? '#***' : '';
+      return `${u.protocol}//${auth}${u.host}${u.pathname}${q}${h}`;
     }
-    return url;
-  } catch (_) { return url.replace(/:\/\/[^@]+@/, '://***:***@'); }
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch (_) { return url.replace(/:\/\/[^@]+@/, '://***:***@').replace(/\?.*$/, '?***').replace(/#.*$/, '#***'); }
 }
 
 function isNoProxy(targetUrl, siteConfig) {
@@ -43,7 +48,7 @@ function isNoProxy(targetUrl, siteConfig) {
   for (const entry of list) {
     const pat = entry.replace(/^\./, '');
     if (!pat) continue;
-    if (pat === '*' || hostname === pat || hostname.endsWith(`.${pat}`) || hostname.endsWith(pat)) return true;
+    if (pat === '*' || hostname === pat || hostname.endsWith(`.${pat}`)) return true;
   }
   return false;
 }
@@ -76,18 +81,64 @@ function getProxyAgents(siteConfig, targetUrl) {
     log(`代理地址无效，已回退直连：${desensitizeProxyUrl(proxyUrl)} (${e.message})`, { level: 'warn', event: 'proxy_invalid', context: { proxy: desensitizeProxyUrl(proxyUrl), site: (siteConfig && siteConfig.name) || '' }, site: (siteConfig && siteConfig.name) || '' });
     return null;
   }
+  // 复用 Agent，避免每页新建导致 socket 泄漏（尤其 batchSize 并发）
+  if (!getProxyAgents._cache) getProxyAgents._cache = new Map();
+  const cached = getProxyAgents._cache.get(proxyUrl);
+  if (cached) return cached;
   try {
     const { HttpsProxyAgent } = require('https-proxy-agent');
     const { HttpProxyAgent } = require('http-proxy-agent');
-    return {
+    const entry = {
       proxyUrl,
-      httpAgent: new HttpProxyAgent(proxyUrl),
-      httpsAgent: new HttpsProxyAgent(proxyUrl)
+      httpAgent: new HttpProxyAgent(proxyUrl, { keepAlive: true }),
+      httpsAgent: new HttpsProxyAgent(proxyUrl, { keepAlive: true })
     };
+    getProxyAgents._cache.set(proxyUrl, entry);
+    return entry;
   } catch (e) {
     log(`代理组件加载失败，已回退直连：${e.message}`, { level: 'warn', event: 'proxy_agent_failed', context: { error: e.message, site: (siteConfig && siteConfig.name) || '' }, site: (siteConfig && siteConfig.name) || '' });
     return null;
   }
+}
+
+// 单页双 405 秒级换 IP：仅 mihomo 场景，通过 external-controller 切节点
+async function trySwitchProxy(siteConfig, reason) {
+  const proxyUrl = resolveProxyUrl(siteConfig);
+  if (!proxyUrl) return false;
+  const siteName = (siteConfig && siteConfig.name) || '';
+  let host = '';
+  try { host = new URL(proxyUrl).hostname.toLowerCase(); } catch (_) { return false; }
+  const isMihomo = host === 'mihomo' || host === '127.0.0.1' || host === 'localhost' || proxyUrl.includes('mihomo:7890') || proxyUrl.includes('127.0.0.1:7890');
+  if (!isMihomo) return false;
+  const controllers = [];
+  if (process.env.MIHOMO_CONTROLLER) controllers.push(process.env.MIHOMO_CONTROLLER);
+  controllers.push('http://mihomo:9090', 'http://127.0.0.1:9090');
+  const secret = process.env.MIHOMO_SECRET || '';
+  const headers = secret ? { Authorization: `Bearer ${secret}` } : {};
+  for (const base of controllers) {
+    try {
+      // 取当前组与可用节点
+      const listRes = await axios.get(`${base}/proxies`, { timeout: 2000, headers, proxy: false });
+      const proxies = listRes.data && listRes.data.proxies ? listRes.data.proxies : {};
+      const group = proxies.PROXY || proxies.proxy || null;
+      if (!group) continue;
+      const now = group.now || '';
+      // 收集可切目标：优先同组 all，其次 remote 池
+      const candidates = [];
+      if (Array.isArray(group.all)) candidates.push(...group.all);
+      // 从 providers/remote 也可枚举，但 all 已含 use: remote 的展开
+      const next = candidates.find(n => n !== now && n !== 'DIRECT' && n.toLowerCase() !== 'direct') || candidates.find(n => n !== now);
+      if (!next) continue;
+      await axios.put(`${base}/proxies/PROXY`, { name: next }, { timeout: 2000, headers, proxy: false });
+      log(`代理已切换 [${siteName}] ${reason}：${now || 'unknown'} → ${next}`, { event: 'proxy_switched', context: { site: siteName, from: now, to: next, reason, controller: base }, site: siteName });
+      return true;
+    } catch (e) {
+      // 试下一个控制器
+      continue;
+    }
+  }
+  log(`代理切换失败 [${siteName}] ${reason}`, { level: 'warn', event: 'proxy_switch_failed', context: { site: siteName, reason }, site: siteName });
+  return false;
 }
 
 // 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
@@ -296,6 +347,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         const snippet405 = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
         const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
         log(`第 ${pageNo} 页 POST 仍 405（GET→POST 双 405），不再重试直接跳过 [code=${error.code} status=${errStatus} method=${method}${extra405}]`, { level: 'error', event: 'page_failed_dual405', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
+        // 单页即换 IP：mihomo 场景下秒级切节点，避免攒够 consecutive405 才熔断
+        try { await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
         return { pageData: [], failed: true, status: errStatus };
       }
       retries++;
@@ -303,7 +356,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       const snippet405 = errStatus === 405 ? formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim() : '';
       const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
-      if (retries === maxRetries) {
+      if (retries >= maxRetries) {
         log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [code=${error.code} status=${errStatus} method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
         return { pageData: [], failed: true, status: errStatus };
       }
@@ -474,7 +527,7 @@ async function crawl(a, b, c, d) {
         failedCount++;
         totalFailed++;
         if (status === 405) consecutive405++;
-        else consecutive405 = 0;
+        // 非 405 失败不重置，避免 405/超时交替时永不熔断
         log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status }, site });
         continue;
       }
@@ -642,4 +695,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };
