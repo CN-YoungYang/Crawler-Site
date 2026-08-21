@@ -380,31 +380,40 @@ async function crawl(a, b, c, d) {
   } else {
     for (const [publishTime, data] of Object.entries(allData)) {
       const fileName = path.join(fileDir(site), `${publishTime.replace(/\//g, '-')}.xlsx`);
-      fs.mkdirSync(path.dirname(fileName), { recursive: true });
-
-      let existingFileData = [];
-      if (fs.existsSync(fileName)) {
-        const rows = readXlsxRowsSafe(fileName, site, 'merge_read_failed');
-        if (rows === null) {
-          try {
-            const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
-            fs.renameSync(fileName, bak);
-            log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
-          } catch (_) {}
-        } else {
-          existingFileData = rows;
-        }
+      try {
+        fs.mkdirSync(path.dirname(fileName), { recursive: true });
+      } catch (e) {
+        log(`创建目录失败 ${path.dirname(fileName)}: ${e.message} code=${e.code}，本批 ${data.length} 条数据暂无法落盘`, { level: 'error', event: 'file_mkdir_failed', context: { file: fileName, error: e.message, code: e.code, site }, site });
+        continue;
       }
 
-      const newIds = new Set(data.map(item => item.id));
-      const combinedData = [...data, ...existingFileData.filter(item => !newIds.has(item.id))];
+      try {
+        let existingFileData = [];
+        if (fs.existsSync(fileName)) {
+          const rows = readXlsxRowsSafe(fileName, site, 'merge_read_failed');
+          if (rows === null) {
+            try {
+              const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+              fs.renameSync(fileName, bak);
+              log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
+            } catch (_) {}
+          } else {
+            existingFileData = rows;
+          }
+        }
 
-      const ws = xlsx.utils.json_to_sheet(combinedData);
-      const wb = xlsx.utils.book_new();
-      xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
-      xlsx.writeFile(wb, fileName);
+        const newIds = new Set(data.map(item => item.id));
+        const combinedData = [...data, ...existingFileData.filter(item => !newIds.has(item.id))];
 
-      log(`更新文件 ${fileName}，新增 ${data.length} 条记录`, { event: 'file_written', context: { file: fileName, newCount: data.length, site }, site });
+        const ws = xlsx.utils.json_to_sheet(combinedData);
+        const wb = xlsx.utils.book_new();
+        xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
+        xlsx.writeFile(wb, fileName);
+
+        log(`更新文件 ${fileName}，新增 ${data.length} 条记录`, { event: 'file_written', context: { file: fileName, newCount: data.length, site }, site });
+      } catch (e) {
+        log(`写入文件失败 ${fileName}: ${e.message} code=${e.code}，本批 ${data.length} 条数据丢失`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code: e.code, site }, site });
+      }
     }
   }
 

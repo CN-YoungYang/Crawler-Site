@@ -120,7 +120,12 @@ function scanFiles(site) {
   const siteName = site ? normalizeSite(site) : defaultSite();
   const dir = fileDir(siteName);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      log(`创建报告目录失败 ${dir}: ${e.message} code=${e.code}`, { level: 'warn', event: 'report_mkdir_failed', context: { site: siteName, dir, error: e.message, code: e.code }, site: siteName });
+      return [];
+    }
     return [];
   }
 
