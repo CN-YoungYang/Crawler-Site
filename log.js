@@ -44,8 +44,9 @@ function appendJsonl(line, site) {
   } catch (e) {
     // 磁盘只读/宿主机挂载权限（如 ./logs 为 root 属主）导致 EACCES 时不让进程崩溃
     // 已有控制台输出兜底，此处仅静默吞掉文件通道错误，避免 server 监听回调抛到顶层
-    if (e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
-      console.error(`[log] JSONL 写入失败: ${e.message} code=${e.code}`);
+    const code = e.code || String(e.errno) || 'UNKNOWN';
+    if (code !== 'EACCES' && code !== 'EPERM' && code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
+      console.error(`[log] JSONL 写入失败: ${e.message} code=${code}`);
     }
   }
 }
@@ -57,15 +58,27 @@ function pruneOldLogs(site) {
     if (!fs.existsSync(dir)) return;
     const todayStr = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
     const cutoffStr = new Date(new Date(todayStr + 'T00:00:00Z').getTime() - (RETENTION_DAYS - 1) * 86400000).toISOString().slice(0, 10);
-    for (const name of fs.readdirSync(dir)) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch (e) {
+      const code = e.code || String(e.errno) || 'UNKNOWN';
+      if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS' || e.code === 'EACCES' || e.code === 'EPERM' || e.code === 'EROFS') return;
+      throw e;
+    }
+    for (const name of entries) {
       const m = /^crawler-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
       if (!m) continue;
       if (m[1] < cutoffStr) {
-        try { fs.unlinkSync(path.join(dir, name)); } catch (_) {}
+        try { fs.unlinkSync(path.join(dir, name)); } catch (e) {
+          const code = e.code || String(e.errno) || 'UNKNOWN';
+          if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') continue;
+        }
       }
     }
   } catch (e) {
-    if (e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
+    const code = e.code || String(e.errno) || 'UNKNOWN';
+    if (code !== 'EACCES' && code !== 'EPERM' && code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'EROFS') {
       console.error(`[log] 清理旧日志失败: ${e.message}`);
     }
   }

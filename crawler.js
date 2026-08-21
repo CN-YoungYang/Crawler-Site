@@ -375,15 +375,30 @@ async function crawl(a, b, c, d) {
     }
   }
 
+  let fileWriteFailed = 0;
+  let fileWriteSucceeded = 0;
+  const failedIds = new Set();
+  const createdDirs = new Set();
   if (Object.keys(allData).length === 0) {
     log('没有爬取到任何新数据', { event: 'no_new_data', context: { site }, site });
   } else {
     for (const [publishTime, data] of Object.entries(allData)) {
       const fileName = path.join(fileDir(site), `${publishTime.replace(/\//g, '-')}.xlsx`);
+      const dirName = path.dirname(fileName);
+      // 同一批次同 site 目录相同，失败仅告警一次，避免刷屏
       try {
-        fs.mkdirSync(path.dirname(fileName), { recursive: true });
+        if (!createdDirs.has(dirName)) {
+          fs.mkdirSync(dirName, { recursive: true });
+          createdDirs.add(dirName);
+        }
       } catch (e) {
-        log(`创建目录失败 ${path.dirname(fileName)}: ${e.message} code=${e.code}，本批 ${data.length} 条数据暂无法落盘`, { level: 'error', event: 'file_mkdir_failed', context: { file: fileName, error: e.message, code: e.code, site }, site });
+        const code = e.code || e.errno || 'UNKNOWN';
+        if (!createdDirs.has(dirName)) {
+          log(`创建目录失败 ${dirName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂无法落盘`, { level: 'error', event: 'file_mkdir_failed', context: { file: fileName, error: e.message, code, site }, site });
+          createdDirs.add(dirName);
+        }
+        fileWriteFailed++;
+        for (const item of data) failedIds.add(item.id);
         continue;
       }
 
@@ -396,7 +411,10 @@ async function crawl(a, b, c, d) {
               const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
               fs.renameSync(fileName, bak);
               log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
-            } catch (_) {}
+            } catch (renameErr) {
+              const code = renameErr.code || renameErr.errno || 'UNKNOWN';
+              log(`备份损坏文件失败 ${fileName}: ${renameErr.message} code=${code}`, { level: 'warn', event: 'corrupt_backup_failed', context: { file: fileName, error: renameErr.message, code, site }, site });
+            }
           } else {
             existingFileData = rows;
           }
@@ -410,22 +428,36 @@ async function crawl(a, b, c, d) {
         xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
         xlsx.writeFile(wb, fileName);
 
+        fileWriteSucceeded++;
         log(`更新文件 ${fileName}，新增 ${data.length} 条记录`, { event: 'file_written', context: { file: fileName, newCount: data.length, site }, site });
       } catch (e) {
-        log(`写入文件失败 ${fileName}: ${e.message} code=${e.code}，本批 ${data.length} 条数据丢失`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code: e.code, site }, site });
+        const code = e.code || e.errno || 'UNKNOWN';
+        fileWriteFailed++;
+        for (const item of data) failedIds.add(item.id);
+        log(`写入文件失败 ${fileName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂未落盘，将随 checkpoint 重试`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code, site }, site });
       }
     }
+  }
+
+  // 落盘失败的 id 回滚出 existingIds，避免 checkpoint 将未落盘数据标记为已爬
+  if (failedIds.size) {
+    for (const id of failedIds) existingIds.delete(id);
   }
 
   if (stoppedBySignal) {
     saveCheckpoint(site, currentPage, existingIds);
     log(`已优雅退出，checkpoint 已保存（起始页 ${currentPage}），下次将续跑`, { level: 'warn', event: 'graceful_exit', context: { currentPage, site }, site });
+  } else if (fileWriteFailed > 0) {
+    saveCheckpoint(site, currentPage, existingIds);
+    log(`部分文件落盘失败 ${fileWriteFailed} 个日期（成功 ${fileWriteSucceeded} 个），已保留 checkpoint（起始页 ${currentPage}）待下次重试，未落盘数据不计入去重`, { level: 'error', event: 'checkpoint_retained_on_file_error', context: { site, fileWriteFailed, fileWriteSucceeded, currentPage, failedIds: failedIds.size }, site });
   } else {
     clearCheckpoint(site);
   }
 
   const durationMs = Date.now() - startedAt;
-  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条，失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s`, { event: 'crawl_end', context: { totalNew, totalFailed, endReached, durationMs, stoppedBySignal, site }, site });
+  const totalPersisted = totalNew - failedIds.size;
+  const crawlLevel = fileWriteFailed > 0 ? 'warn' : 'info';
+  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, site }, site });
 }
 
 function readRecentIds(site) {

@@ -130,7 +130,18 @@ function scanFiles(site) {
   }
 
   const { start, end } = getReportWindow();
-  const entries = fs.readdirSync(dir)
+  let dirEntries;
+  try {
+    dirEntries = fs.readdirSync(dir);
+  } catch (e) {
+    const code = e.code || e.errno || 'UNKNOWN';
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+      log(`读取报告目录失败 ${dir}: ${e.message} code=${code}，已跳过`, { level: 'warn', event: 'report_readdir_failed', context: { site: siteName, dir, error: e.message, code }, site: siteName });
+      return [];
+    }
+    throw e;
+  }
+  const entries = dirEntries
     .filter(fileName => fileName.endsWith('.xlsx'))
     .map(fileName => {
       const fileDate = parseFileDate(fileName);
@@ -138,9 +149,20 @@ function scanFiles(site) {
 
       const filePath = path.join(dir, fileName);
       if (fileDate < start) {
-        fs.unlinkSync(filePath);
+        try {
+          fs.unlinkSync(filePath);
+        } catch (e) {
+          const code = e.code || e.errno || 'UNKNOWN';
+          log(`清理过期文件失败 ${fileName}: ${e.message} code=${code}`, { level: 'warn', event: 'report_prune_failed', context: { site: siteName, file: fileName, error: e.message, code }, site: siteName });
+          return null;
+        }
         const detailPath = path.join(dir, `${fileName.replace(/\.xlsx$/, '')}.html`);
-        if (fs.existsSync(detailPath)) fs.unlinkSync(detailPath);
+        if (fs.existsSync(detailPath)) {
+          try { fs.unlinkSync(detailPath); } catch (e) {
+            const code = e.code || e.errno || 'UNKNOWN';
+            log(`清理过期明细页失败 ${detailPath}: ${e.message} code=${code}`, { level: 'warn', event: 'report_prune_detail_failed', context: { site: siteName, file: detailPath, error: e.message, code }, site: siteName });
+          }
+        }
         log(`已清理过期源数据：${fileName}`, { context: { site: siteName }, site: siteName });
         return null;
       }
@@ -1214,6 +1236,13 @@ async function generateReport(site) {
   const dir = fileDir(siteName);
   const files = scanFiles(siteName);
   pruneOldLogs(siteName);
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    const code = e.code || e.errno || 'UNKNOWN';
+    log(`创建报告目录失败 ${dir}: ${e.message} code=${code}，跳过报告生成`, { level: 'error', event: 'report_mkdir_failed', context: { site: siteName, dir, error: e.message, code }, site: siteName });
+    throw e;
+  }
   await Promise.all([
     fsp.writeFile(indexHtmlPath(siteName), buildIndexHtml(files), 'utf8'),
     fsp.writeFile(tokensCssPath(siteName), TOKENS_CSS, 'utf8'),
@@ -1256,14 +1285,31 @@ async function generateNav(sites) {
     const idxPath = indexHtmlPath(s.site);
     const dir = fileDir(s.site);
     if (!fs.existsSync(idxPath)) {
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      await fsp.writeFile(idxPath, buildIndexHtml(s.files), 'utf8');
-      await fsp.writeFile(tokensCssPath(s.site), TOKENS_CSS, 'utf8');
+      try {
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      } catch (e) {
+        const code = e.code || e.errno || 'UNKNOWN';
+        log(`创建站点目录失败 ${dir}: ${e.message} code=${code}，跳过占位报告`, { level: 'warn', event: 'nav_mkdir_site_failed', context: { site: s.site, dir, error: e.message, code } });
+        continue;
+      }
+      try {
+        await fsp.writeFile(idxPath, buildIndexHtml(s.files), 'utf8');
+        await fsp.writeFile(tokensCssPath(s.site), TOKENS_CSS, 'utf8');
+      } catch (e) {
+        const code = e.code || e.errno || 'UNKNOWN';
+        log(`写入占位报告失败 [${s.site}]: ${e.message} code=${code}`, { level: 'warn', event: 'nav_write_placeholder_failed', context: { site: s.site, error: e.message, code } });
+      }
     }
   }
   const html = buildNavHtml(sitesData);
   const fileRoot = path.join(process.cwd(), 'file');
-  if (!fs.existsSync(fileRoot)) fs.mkdirSync(fileRoot, { recursive: true });
+  try {
+    if (!fs.existsSync(fileRoot)) fs.mkdirSync(fileRoot, { recursive: true });
+  } catch (e) {
+    const code = e.code || e.errno || 'UNKNOWN';
+    log(`创建导航根目录失败 ${fileRoot}: ${e.message} code=${code}`, { level: 'error', event: 'nav_mkdir_root_failed', context: { error: e.message, code } });
+    throw e;
+  }
   await Promise.all([
     fsp.writeFile(navHtmlPath(), html, 'utf8'),
     fsp.writeFile(navTokensCssPath(), TOKENS_CSS, 'utf8'),
