@@ -218,6 +218,13 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
           continue;
         }
       }
+      // 双 405 快败：GET 已降级为 POST 仍 405，说明是 WAF/网关确定性拦截，重试无意义，直接跳过
+      if (errStatus === 405 && triedFallback && method === 'POST') {
+        const snippet405 = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
+        const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
+        log(`第 ${pageNo} 页 POST 仍 405（GET→POST 双 405），不再重试直接跳过 [code=${error.code} status=${errStatus} method=${method}${extra405}]`, { level: 'error', event: 'page_failed_dual405', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
+        return { pageData: [], failed: true, status: errStatus };
+      }
       retries++;
       const backoff = backoffDelay(retries - 1);
       const snippet405 = errStatus === 405 ? formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim() : '';
@@ -225,7 +232,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries === maxRetries) {
         log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [code=${error.code} status=${errStatus} method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
-        return { pageData: [], failed: true };
+        return { pageData: [], failed: true, status: errStatus };
       }
       await new Promise(resolve => setTimeout(resolve, backoff));
     }
@@ -355,6 +362,7 @@ async function crawl(a, b, c, d) {
   let totalNew = 0;
   let totalFailed = 0;
   let endReached = false;
+  let consecutive405 = 0;
 
   while (currentPage <= totalPages && !shouldStopCrawling) {
     if (stopping) {
@@ -374,15 +382,20 @@ async function crawl(a, b, c, d) {
     let batchEndReached = false;
 
     for (let i = 0; i < results.length; i++) {
-      const { pageData, failed, endReached: ended } = results[i];
+      const { pageData, failed, endReached: ended, status } = results[i];
       const pageNo = currentPage + i;
 
       if (failed) {
         failedCount++;
         totalFailed++;
-        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site }, site });
+        if (status === 405) consecutive405++;
+        else consecutive405 = 0;
+        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status }, site });
         continue;
       }
+
+      // 非失败页（成功或边界）重置 405 熔断计数
+      consecutive405 = 0;
 
       if (ended) {
         batchEndReached = true;
@@ -408,7 +421,11 @@ async function crawl(a, b, c, d) {
 
     currentPage += pagesToCrawl;
 
-    if (batchEndReached) {
+    // 双 405 熔断：连续 2 页 GET→POST 均 405，判定为站点级拦截/配置失效，避免 100 页空转
+    if (consecutive405 >= 2) {
+      log(`连续 ${consecutive405} 页 405（GET→POST 双 405），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${totalPages} 页，剩余 ${Math.max(0, totalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, triedPages: currentPage - 1, totalPages }, site });
+      shouldStopCrawling = true;
+    } else if (batchEndReached) {
       endReached = true;
       shouldStopCrawling = true;
     } else if (!hasNewDataInBatch && failedCount === 0) {
