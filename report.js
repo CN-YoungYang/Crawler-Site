@@ -11,6 +11,17 @@ const { log, pruneOldLogs } = require('./log');
 const { normalizeSite } = require('./sites');
 
 const RETENTION_DAYS = 30;
+// 索引页「最新公告」预览条数：仅内联最新一天前 N 条（{title,link,area}），其余日期保持轻量不内联
+const LATEST_PREVIEW_COUNT = 10;
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function fileDir(site) {
   return path.join('file', normalizeSite(site));
@@ -405,16 +416,17 @@ const COMMON_CSS = `
 
   .date-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 0.75rem;
     width: 100%;
   }
   .date-item {
-    display: grid;
-    grid-template-rows: 1fr auto;
-    gap: 1.25rem;
-    min-height: 7.25rem;
-    padding: 1rem 1.05rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-height: 5.5rem;
+    padding: 0.85rem 0.9rem;
     border: 1px solid var(--border);
     background: var(--bg-subtle);
     color: var(--fg);
@@ -491,12 +503,16 @@ const COMMON_CSS = `
 
   .stat-value-small { font-size: 0.95rem; }
   .section-note { margin: 0.25rem 0 0; color: var(--fg-muted); font-size: 0.8125rem; }
+  /* 最新公告预览区：紧凑，不额外撑高 */
+  #latest-section { margin: calc(var(--space-xl) * -1) 0 var(--space-lg); }
+  #latest-section .table-container { max-height: 24rem; overflow-y: auto; }
+  .latest-more-link { display: inline-flex; align-items: center; white-space: nowrap; }
   .retention-banner {
     display: grid;
     grid-template-columns: auto auto auto 1fr;
     gap: 0.7rem;
     align-items: center;
-    margin: -1.75rem 0 2.5rem;
+    margin: 0 0 var(--space-xl);
     padding: 0.85rem 1rem;
     border-left: 3px solid var(--accent);
     background: var(--bg-subtle);
@@ -510,18 +526,23 @@ const COMMON_CSS = `
   [hidden] { display: none !important; }
   .row-hidden { display: none !important; }
 
+  @media (min-width: 981px) and (max-width: 1180px) {
+    .date-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  }
+
   @media (min-width: 641px) and (max-width: 980px) {
     .date-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
 
   @media (max-width: 640px) {
     .stats-grid { grid-template-columns: 1fr; gap: var(--space-lg); }
-    .retention-banner { grid-template-columns: 1fr; gap: 0.25rem; margin-top: -1rem; }
+    .retention-banner { grid-template-columns: 1fr; gap: 0.25rem; }
     .retention-copy { justify-self: start; text-align: left; }
     .filter-controls { flex-direction: column; }
     .search-input { max-width: 100%; }
     .date-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .date-item { min-height: 6.5rem; padding: 0.85rem; }
+    .date-item { min-height: 5rem; padding: 0.8rem; }
+    .latest-more-link { align-self: flex-start; }
     .data-table th, .data-table td { padding-right: var(--space-sm); }
     .index-table { width: 100%; }
   }
@@ -890,6 +911,17 @@ function buildIndexHtml(files) {
   const windowLabel = formatDateForFile(reportWindow.start) + ' 至 ' + formatDateForFile(reportWindow.end);
   const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false });
   const rowsJson = inlineJson(files.map(f => ({ date: f.date, fileName: f.fileName, count: f.rows.length })));
+  // 跨全部日期取最新 N 条（files 按日期降序，逐日累加至取满），索引页保持轻量
+  const previewRows = [];
+  for (const f of files) {
+    for (const r of f.rows) {
+      if (previewRows.length >= LATEST_PREVIEW_COUNT) break;
+      previewRows.push({ title: r.title || '', link: r.link || '', area: r.area || '', date: f.date });
+    }
+    if (previewRows.length >= LATEST_PREVIEW_COUNT) break;
+  }
+  const newestDate = previewRows.length ? previewRows[0].date : null;
+  const previewJson = inlineJson({ newestDate, rows: previewRows });
   const filterHidden = totalDates ? '' : ' hidden';
 
   return `<!DOCTYPE html>
@@ -917,6 +949,14 @@ function buildIndexHtml(files) {
     <div class="stat-item"><span class="stat-label">总计记录</span><span class="stat-value">${totalRecords.toLocaleString('zh-CN')}</span></div>
     <div class="stat-item"><span class="stat-label">最近更新</span><span class="stat-value cell-mono">${latestUpdate}</span></div>
     <div class="stat-item stat-window"><span class="stat-label">保留窗口</span><span class="stat-value stat-value-small cell-mono">${windowLabel}</span></div>
+  </div>
+
+  <div id="latest-section"${filterHidden}>
+    <div class="filter-header">
+      <div><h2 class="section-title">最新公告</h2><p class="section-note" id="latest-note">最新 ${LATEST_PREVIEW_COUNT} 条公告</p></div>
+      <a id="latest-more" class="btn-secondary latest-more-link" href="#">查看全部 →</a>
+    </div>
+    <div id="latest-list" class="table-container"></div>
   </div>
 
   <div class="retention-banner" role="status">
@@ -953,8 +993,65 @@ function buildIndexHtml(files) {
   var rowElements = [];
 
   if (!files.length) {
+    document.getElementById('latest-section').hidden = true;
     content.innerHTML = '<div class="empty-state"><strong>暂无数据</strong><p>完成首次爬取后，这里将显示日期列表。</p></div>';
   } else {
+    // 最新公告预览：跨全部日期取最新的前 N 条（生成时内联）
+    var preview = ${previewJson};
+    (function() {
+      var section = document.getElementById('latest-section');
+      if (!preview.rows.length) { section.hidden = true; return; }
+      var noteEl = document.getElementById('latest-note');
+      var moreEl = document.getElementById('latest-more');
+      var listEl = document.getElementById('latest-list');
+      noteEl.textContent = '最新 ' + preview.rows.length.toLocaleString('zh-CN') + ' 条公告';
+      moreEl.href = preview.newestDate + '.html';
+      var table = document.createElement('table');
+      table.className = 'data-table detail-table';
+      var thead = document.createElement('thead');
+      var headTr = document.createElement('tr');
+      ['标题', '地区', '日期'].forEach(function(label) {
+        var th = document.createElement('th');
+        th.scope = 'col';
+        th.textContent = label;
+        headTr.appendChild(th);
+      });
+      thead.appendChild(headTr);
+      table.appendChild(thead);
+      var tbody = document.createElement('tbody');
+      preview.rows.forEach(function(r) {
+        var tr = document.createElement('tr');
+        var tdTitle = document.createElement('td');
+        tdTitle.className = 'cell-wrap';
+        if (r.link && (r.link.indexOf('http://') === 0 || r.link.indexOf('https://') === 0)) {
+          var a = document.createElement('a');
+          a.href = r.link;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = r.title || '未命名公告';
+          a.title = r.title || '未命名公告';
+          tdTitle.appendChild(a);
+        } else {
+          tdTitle.textContent = r.title || '未命名公告';
+        }
+        tr.appendChild(tdTitle);
+        var tdArea = document.createElement('td');
+        var badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = r.area || '未知';
+        badge.title = r.area || '未知';
+        tdArea.appendChild(badge);
+        tr.appendChild(tdArea);
+        var tdDate = document.createElement('td');
+        tdDate.className = 'cell-mono';
+        tdDate.textContent = r.date;
+        tr.appendChild(tdDate);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      listEl.appendChild(table);
+    })();
+
     var list = document.createElement('div');
     list.className = 'date-grid';
     files.forEach(function(f) {
@@ -1330,4 +1427,4 @@ async function generateNav(sites) {
   return { sitesData, html };
 }
 
-module.exports = { generateReport, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS };
+module.exports = { generateReport, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS, LATEST_PREVIEW_COUNT };

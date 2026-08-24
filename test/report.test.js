@@ -1,7 +1,7 @@
 // Seam: HTML 报告生成边界
 // 行为：(1) file/<site>/ 不存在 → 创建目录 + 生成含"暂无数据"的 index.html；
 //      (2) 损坏 xlsx → 跳过该文件、其余正常生成、log 警告；
-//      (3) 按日期分片：index.html 轻量（仅日期/记录数/链接），明细落 <date>.html。
+//      (3) 按日期分片：index.html 轻量（仅日期/记录数/链接 + 跨日期最新 N 条预览），明细落 <date>.html。
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -19,16 +19,18 @@ function freshReport() {
 async function main() {
   // (1) 空目录 → "暂无数据"
   await withTempCwd(async (dir) => {
-    const { generateReport } = freshReport();
+    const { generateReport, LATEST_PREVIEW_COUNT } = freshReport();
     await generateReport(SITE);
 
     const html = fs.readFileSync(path.join(dir, 'file', SITE, 'index.html'), 'utf8');
     const tokens = fs.readFileSync(path.join(dir, 'file', SITE, 'tokens.css'), 'utf8');
     assert.ok(html.includes('暂无数据'), '空目录应渲染"暂无数据"');
+    assert.ok(html.includes("document.getElementById('latest-section').hidden = true"), '空目录应隐藏最新公告预览');
     assert.ok(!html.includes('正常标题'), '索引页不应内联明细数据');
     assert.ok(html.includes('href="tokens.css"'), '报告页应加载共享设计 token');
     assert.ok(tokens.includes('Taste Skill: Clean Utility & High-Density Data'), 'token 文件应记录 Taste Skill 设计');
     assert.ok(tokens.includes('--bg'), 'token 文件应定义背景色');
+    assert.strictEqual(LATEST_PREVIEW_COUNT, 10, '最新公告预览默认 10 条');
   });
 
   // (2) 损坏 xlsx 跳过、正常 xlsx 保留 + 分片明细
@@ -49,13 +51,23 @@ async function main() {
 
     const indexHtml = fs.readFileSync(path.join(fileDir, 'index.html'), 'utf8');
     assert.ok(!indexHtml.includes('BAD'), '坏文件不应出现在索引页');
-    assert.ok(!indexHtml.includes('正常标题'), '索引页不应内联明细标题');
+    // 最新公告预览：跨全部日期取最新 N 条
+    assert.ok(indexHtml.includes('正常标题'), '索引页应内联最新公告预览标题');
+    assert.ok(indexHtml.includes('最新公告'), '索引页应有最新公告预览区');
+    assert.ok(indexHtml.includes("preview.newestDate + '.html'"), '查看全部应跳最新一天明细页');
+    assert.ok(indexHtml.includes("'noopener noreferrer'"), '预览外链应隔离新窗口上下文');
+    const previewMatch = indexHtml.match(/var preview = (.*);/);
+    assert.ok(previewMatch, '索引页应内联预览 JSON');
+    const preview = JSON.parse(previewMatch[1]);
+    assert.ok(Array.isArray(preview.rows) && preview.rows.length === 1, '单日数据预览应含该日记录');
+    assert.strictEqual(preview.rows[0].date, '2026-08-17', '预览行应携带日期');
     assert.ok(indexHtml.includes('2026-08-17.xlsx'), '索引页应有下载链接');
     assert.ok(indexHtml.includes('"2026-08-17"'), '索引页 JSON 应含日期');
     assert.ok(indexHtml.includes("f.date + '.html'"), '索引页 JS 应拼明细页链接');
     assert.ok(indexHtml.includes('<span class="stat-label">总计日期</span><span class="stat-value">1</span>'), '统计应只计好文件');
     assert.ok(indexHtml.includes('stats-grid'), '索引页应有紧凑统计带');
     assert.ok(indexHtml.includes('date-search-status'), '索引页日期搜索应反馈结果数');
+    assert.ok(indexHtml.includes('../index.html'), '索引页应有返回导航入口');
 
     const detailHtml = fs.readFileSync(path.join(fileDir, '2026-08-17.html'), 'utf8');
     assert.ok(detailHtml.includes('正常标题'), '明细页应含该日标题');
