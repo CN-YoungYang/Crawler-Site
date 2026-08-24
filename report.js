@@ -903,6 +903,10 @@ function buildIndexHtml(files) {
 </head>
 <body>
 <div class="container">
+  <nav class="top-nav">
+    <a class="nav-link" href="../index.html">← 返回导航</a>
+  </nav>
+
   <header class="header">
     <h1 class="page-title">招标公告数据索引</h1>
     <p class="page-meta">生成于 ${generatedAt} · 仅保留最近 ${RETENTION_DAYS} 天</p>
@@ -1040,6 +1044,7 @@ function buildDetailHtml(file) {
 <div class="container">
   <nav class="top-nav">
     <a class="nav-link" href="index.html">← 返回索引</a>
+    <a class="nav-link" href="../index.html">导航页</a>
     <a class="nav-link" href="${downloadHref}" download>下载本日 XLSX</a>
   </nav>
 
