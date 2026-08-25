@@ -30,9 +30,11 @@
 ## 非目标/排除
 
 - 全站 `axios` 静态抓取；`ceb` 因 WAF 固定 IP 被拦时经代理换 IP（`HTTP_PROXY/CEB_PROXY_URL` 经 `http-proxy-agent/https-proxy-agent` 注入，`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`），未配时代理直连。
+- **ceb→ctbpsp.com 切换已否决（2026-08-25，见 ADR 0002）**：ctbpsp JSON API 的网易易盾票据被服务端风控对全自动流量一律拒绝（协议已 100% 还原仍被拒，票据单次消费），ceb 维持旧源+代理换 IP；成果归档于 `jsreverse-yidun/`（gitignored），结论见 `docs/progress-ceb-ctbpsp.md`。
 - `CRON_EXPR` 仅支持 `m h * * *`（如 `0 2 * * *`），复杂表达式需另引 cron 库。
 - 旧扁平 `file/*.xlsx` 不迁移，仅新站点走 `file/<site>/`。
 
 ## 关联 ADR
 
 - `docs/adr/0001-docker-site-isolation.md` — Docker 化、GHCR、多站点隔离与占位策略（含 2026-08-20 修订：一容器多站点并发与策略化）。
+- `docs/adr/0002-ceb-keep-legacy-source.md` — ceb 否决切换 ctbpsp.com，维持旧源代理换 IP（2026-08-25）。

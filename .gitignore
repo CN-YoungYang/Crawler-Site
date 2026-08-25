@@ -18,6 +18,9 @@ mihomo/config.yaml
 !.env.example
 *.log
 
+# JS 逆向归档（ceb→ctbpsp 迁移成果，含易盾协议实现/取证/可切换代码；见 docs/progress-ceb-ctbpsp.md）
+/jsreverse-yidun/
+
 # 系统文件
 .DS_Store
 Thumbs.db

@@ -19,6 +19,7 @@ This is a Node.js crawler for public bidding notices from `yfbzb.com` (with mult
 - `.github/workflows/docker-build.yml`: GHCR build & push on `push main` / `tag v*` / `workflow_dispatch` (`npm test` gate, `gha` cache, `linux/amd64,linux/arm64`).
 - `page_content.html`: yfbzb 离线样页快照，用于离线校验 Cheerio 选择器；ceb 无随仓样页（`.dockerignore` 的 `page_content*.html` 排除于镜像），回归以线上解析为准。
 - `docs/agents/`: local workflow and domain notes.
+- `jsreverse-yidun/` (gitignored): ceb→ctbpsp 迁移的逆向成果归档（易盾协议实现/取证/可切回的 `ceb.js`+`crawler.js`），迁移已于 2026-08-25 终止，结论见 `docs/progress-ceb-ctbpsp.md`；勿重复攻坚 ctbpsp 求解器（卡点是服务端风控策略）。
 - `CLAUDE.md`: repository-specific agent instructions; consult it before changing crawler behavior.
 
 ## Build, Test, and Development Commands
