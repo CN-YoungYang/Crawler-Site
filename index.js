@@ -242,7 +242,7 @@ async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDe
     log(`站点 [${siteNorm}] 将在 ${(initialDelay / 1000).toFixed(1)} 秒后开始运行`, { event: 'schedule_wait', context: { site: siteNorm, delayMs: initialDelay }, site: siteNorm });
     const slept = await sleepInterruptible(initialDelay);
     if (!slept || isStopping()) return;
-    log(`开始爬取 [${siteNorm}]，总页数：${totalPages}，间隔时间：${interval}毫秒`, { event: 'schedule_run', context: { site: siteNorm, totalPages, interval }, site: siteNorm });
+    // 开始爬取由 crawler.js#crawl 的 crawl_start 事件记录，此处不再重复打点
     try {
       await crawl({ site: siteNorm, totalPages, interval });
       log('爬取任务已完成', { event: 'schedule_run_done', context: { site: siteNorm }, site: siteNorm });

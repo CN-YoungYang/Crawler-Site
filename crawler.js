@@ -16,6 +16,10 @@ const REQUEST_TIMEOUT = 30000;
 // 重试退避：指数 base*2^attempt，封顶 cap，全量抖动 random(0, delay)
 const BACKOFF_BASE_MS = 2000;
 const BACKOFF_CAP_MS = 60000;
+// 网络级失败（无 HTTP status，如 ECONNRESET/TLS 握手断开）换 IP 阈值：距上次成功页连续 N 页失败即切节点（仅代理站点生效）
+const NET_FAIL_SWITCH_THRESHOLD = 2;
+// 网络级失败熔断：换 IP 后仍连败至 N 页，判定代理出口不可用，提前结束（避免 100 页 × 全量重试空转数小时，2026-08-24 曾空转约 5 小时）
+const NET_FAIL_BREAK_THRESHOLD = 6;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -319,7 +323,10 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         return { pageData: [], failed: false, endReached: true };
       }
       const errStatus = error.response?.status;
-      // 405 自动降级：仅显式开启 fallbackOn405 的站点（如 ceb）才切 POST，且计入重试并退避，避免突破 maxRetries
+      // 405 自动降级：仅显式开启 fallbackOn405 的站点（如 ceb）才切 POST。
+      // 降级不消耗 retries：triedFallback 已保证仅降级一次。若在此扣减最后一次重试额度，
+      // 循环条件 (retries < maxRetries) 直接为假退出且无返回值（隐式 undefined），
+      // 曾致 crawl() 解构 results[i] 崩溃（2026-08-24 17:23 生产日志复现）
       function formatSnippet(data) {
         if (data == null) return '';
         if (Buffer.isBuffer(data)) return data.toString('utf8').slice(0, 300);
@@ -329,18 +336,15 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         return String(data).slice(0, 300);
       }
       if (errStatus === 405 && method === 'GET' && !triedFallback && siteConfig.fallbackOn405) {
-        if (retries >= maxRetries) {
-          // 已无重试额度，回落为普通失败路径
-        } else {
-          triedFallback = true;
-          method = 'POST';
-          const snippet = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
-          log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
-          const backoff = backoffDelay(retries);
-          retries++;
-          await new Promise(resolve => setTimeout(resolve, backoff));
-          continue;
-        }
+        // 降级不消耗 retries：triedFallback 已保证仅降级一次。若在此扣减最后一次重试额度，
+        // 循环条件 (retries < maxRetries) 直接为假退出且无返回值（隐式 undefined），
+        // 曾致 crawl() 解构 results[i] 崩溃（2026-08-24 17:23 生产日志复现）
+        triedFallback = true;
+        method = 'POST';
+        const snippet = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
+        log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
+        await new Promise(resolve => setTimeout(resolve, backoffDelay(retries)));
+        continue;
       }
       // 双 405 快败：GET 已降级为 POST 仍 405，说明是 WAF/网关确定性拦截，重试无意义，直接跳过
       if (errStatus === 405 && triedFallback && method === 'POST') {
@@ -363,6 +367,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       await new Promise(resolve => setTimeout(resolve, backoff));
     }
   }
+  // 终局兜底：重试额度耗尽仍未返回（防御性），确保 crawlPage 永不隐式返回 undefined
+  log(`第 ${pageNo} 页加载失败，重试额度耗尽 [code=EXHAUSTED method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, method, site: siteName }, site: siteName });
+  return { pageData: [], failed: true };
 }
 
 // 优雅退出标志：SIGINT/SIGTERM 置位后，主循环不再开下一批，等当前批自然完成。
@@ -501,6 +508,10 @@ async function crawl(a, b, c, d) {
   let totalFailed = 0;
   let endReached = false;
   let consecutive405 = 0;
+  // 网络级连败（ECONNRESET/超时等无 status 失败）：代理站点达阈值换 IP，再连败至翻倍熔断；成功/边界页清零。
+  // netFailSwitched：本轮连败是否已尝试过换 IP（保证熔断前至少真换一次，批次站单批即可越过换 IP 阈值）
+  let netFailStreak = 0;
+  let netFailSwitched = false;
 
   while (currentPage <= totalPages && !shouldStopCrawling) {
     if (stopping) {
@@ -529,11 +540,16 @@ async function crawl(a, b, c, d) {
         if (status === 405) consecutive405++;
         // 非 405 失败不重置，避免 405/超时交替时永不熔断
         log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status }, site });
+        // 网络级失败（无 status：ECONNRESET/超时/TLS 断开）计数，代理站点达阈值换 IP、再连败熔断；
+        // 有 status 的失败（403/405 等已到服务器）说明链路连通，不计入
+        if (status === undefined || status === null) netFailStreak++;
         continue;
       }
 
-      // 非失败页（成功或边界）重置 405 熔断计数
+      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数
       consecutive405 = 0;
+      netFailStreak = 0;
+      netFailSwitched = false;
 
       if (ended) {
         batchEndReached = true;
@@ -562,6 +578,17 @@ async function crawl(a, b, c, d) {
     // 双 405 熔断：连续 2 页 GET→POST 均 405，判定为站点级拦截/配置失效，避免 100 页空转
     if (consecutive405 >= 2) {
       log(`连续 ${consecutive405} 页 405（GET→POST 双 405），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${totalPages} 页，剩余 ${Math.max(0, totalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, triedPages: currentPage - 1, totalPages }, site });
+      shouldStopCrawling = true;
+    } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
+      // 网络连败换 IP：仅代理站点生效（trySwitchProxy 内部识别 mihomo，直连站为 no-op）。
+      // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
+      let switched = false;
+      try { switched = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}
+      netFailSwitched = true;
+      log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${switched ? '，已切换代理节点' : '，未配置可切换代理'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched }, site });
+    } else if (netFailStreak >= NET_FAIL_BREAK_THRESHOLD && netFailSwitched) {
+      // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
+      log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${totalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages }, site });
       shouldStopCrawling = true;
     } else if (batchEndReached) {
       endReached = true;
@@ -695,4 +722,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
