@@ -87,13 +87,22 @@ curl http://127.0.0.1:8080/health | jq  # 进阶探针
 docker compose down
 ```
 
-`docker-compose.yml` 为单服务 `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
+`docker-compose.yml` 为双服务 `mihomo`（默认启用，`proxy-providers interval 1800s` 定时刷新 + `healthcheck` on `9090/proxies` + `mihomo/update-subscription.sh` 手动刷新，`depends_on mihomo:healthy`）+ `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
 
 ```yaml
-environment:
-  - SITES=${SITES:-yfbzb,ceb}
-  - HTTP_PORT=${HTTP_PORT:-8080}
-  - HTTP_ENABLED=${HTTP_ENABLED:-true}
+services:
+  mihomo:
+    image: metacubex/mihomo:latest
+    volumes: ["./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro"]
+    ports: ["7890:7890", "9090:9090"]
+    healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/proxies >/dev/null 2>&1 || exit 1"], interval: 30s }
+  crawler:
+    depends_on: { mihomo: { condition: service_healthy } }
+    environment:
+      - SITES=${SITES:-yfbzb,ceb}
+      - HTTP_PORT=${HTTP_PORT:-8080}
+      - HTTP_ENABLED=${HTTP_ENABLED:-true}
+      - HTTP_PROXY=${HTTP_PROXY:-}  # 设为 http://mihomo:7890 启用代理换 IP
 ports:
   - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"  # 宿主机:容器，意图由外部反代 80/443 → HTTP_PORT
 volumes:
@@ -140,7 +149,7 @@ server {
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`proxy` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 因固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL`（`http-proxy-agent/https-proxy-agent`，`NO_PROXY` 白名单）代理换 IP（`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST` 并计入重试，双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷（代理下 405 仍触发熔断）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 因固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL`（`http-proxy-agent/https-proxy-agent`，`NO_PROXY` 白名单）代理换 IP（`mihomo` sidecar 默认启用将远端 `clash_fast.yaml` 转 `http://mihomo:7890`，`proxy-providers interval 1800s` + 0 叶子时 `refreshProviders()` 主动刷新）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗（**第一页需总页码，双 405/网络失败会立即换 IP 重试该页一次**），mihomo 下双 405 单页即按序轮换未试过的叶子节点（结构判定不切组/auto，同批并发互斥，轮尽零请求短路，`proxy_pool_empty` 时 `PUT /providers/proxy/remote` 刷新）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
@@ -198,13 +207,17 @@ crawler/
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/getSiteConfigs(sites)/parseSitesList()/listEnabledSites()
 │   ├── _base.js          # 默认策略：defaultBuildUrl/defaultParse/defaultExtractId/defaultIsBoundary
+│   ├── _mihomo.js        # mihomo provider：switchNode/refreshProviders（叶子轮换+订阅刷新）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   ├── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
 │   ├── demo.js           # 策略示例：buildUrl/parse/isBoundary/batchSize 等钩子示例
 │   └── site2.js          # 占位骨架：baseUrl 为空，fail-fast
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
-├── docker-compose.yml    # 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck + mem 400m，HTTP_PROXY 可选），bind mount file/logs
+├── docker-compose.yml    # 双服务 mihomo(默认启用，interval 1800s，healthcheck 9090/proxies，update-subscription.sh) + crawler 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck + mem 400m，HTTP_PROXY 经 mihomo:7890 注入）
 ├── .dockerignore
+├── mihomo/
+│   ├── config.yaml.example  # proxy-providers remote 订阅示例（interval 1800s）
+│   └── update-subscription.sh  # 手动 PUT /providers/proxy/remote 刷新脚本
 ├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
 ├── docs/
@@ -224,7 +237,7 @@ crawler/
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
-- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已切代理换 IP 应对（`HTTP_PROXY/CEB_PROXY_URL` 经 `mihomo` sidecar，可按需启用，不增镜像体积）；其余站点直连，届时可按需单站代理。
+- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认启用代理换 IP 应对（`HTTP_PROXY/CEB_PROXY_URL` 经 `mihomo` sidecar 默认启用，`proxy-providers interval 1800s` + 0 叶子时 `refreshProviders()` 自动刷新，不增镜像体积）；其余站点直连，届时可按需单站代理。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,site2` 在多站点模式下占位站点 warn 跳过。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。
