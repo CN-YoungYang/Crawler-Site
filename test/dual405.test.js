@@ -91,9 +91,17 @@ async function mainBase() {
 // (d) 双 405 触发换点必须轮换取「未试过的叶子节点」，绝不切回 auto/已试节点；
 //     全池试尽后 proxyExhausted，且不再重复切换；成功页清空轮换记忆。
 // (e) 换点成功重置 consecutive405 给新出口观察窗，轮尽后连续 2 页 405 才熔断。
+// (f) 2026-08-26 审查回归锁：mock now 反映 PUT 生效（#10）、断言精确组端点与
+//     控制器请求次数（#9）、轮尽后零控制器请求（#7 短路）、换点只废本站 Agent
+//     缓存条目不碰兄弟站（#1）。
 async function mainRotate() {
   const LEAVES = ['🇭🇰 香港01', '🇸🇬 狮城02', '🇯🇵 东京03']; // 叶子池（含中文名，验证编码与轮换）
+  let controllerGets = 0;
   const controllerPuts = [];
+  // now 维护为真实状态：初始 auto，每次 PUT 后指向被切节点——依赖「排除当前出口」
+  // 语义的回归在此可被捕获（原 mock now 恒 'auto' 掩盖 n !== now 回归，审查 #10）
+  let groupNow = 'auto';
+  const groupSnapshot = () => ({ type: 'Selector', now: groupNow, all: ['auto', ...LEAVES, 'DIRECT'] });
   const restore = mockAxios((url, config) => {
     const u = String(url);
     if (u.includes(':9090/proxies')) {
@@ -101,12 +109,16 @@ async function mainRotate() {
       if (config && config.data !== undefined) {
         const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
         controllerPuts.push({ url: u, name: body.name });
+        groupNow = body.name;
         return { data: {}, status: 204 };
       }
+      controllerGets++;
+      // 单组端点 /proxies/{group} 返回组对象本体（mihomo 真实形态），全量端点才包 proxies
+      if (/\/proxies\/[^/]+$/.test(u)) return { data: { name: 'PROXY', ...groupSnapshot() }, status: 200 };
       return {
         data: {
           proxies: {
-            PROXY: { type: 'Selector', now: 'auto', all: ['auto', ...LEAVES, 'DIRECT'] },
+            PROXY: groupSnapshot(),
             auto: { type: 'URLTest', now: 'auto', all: [...LEAVES] },
             ...Object.fromEntries(LEAVES.map(n => [n, { type: 'Shadowsocks' }])),
             DIRECT: { type: 'Direct' }
@@ -134,7 +146,7 @@ async function mainRotate() {
   // trySwitchProxy 需解析到 mihomo 形态的代理地址才会走控制器切点
   const hadProxy = process.env.HTTP_PROXY;
   process.env.HTTP_PROXY = 'http://mihomo:7890';
-  const { crawl } = freshCrawler();
+  const { crawl, getProxyAgents } = freshCrawler();
 
   try {
     // (d) 轮换语义 + (e) 观察窗与轮尽熔断：batchSize=1 串行可控
@@ -150,9 +162,81 @@ async function mainRotate() {
 
   // (d) 只切叶子、按序轮换、绝不碰 auto/DIRECT/已试节点：恰为 3 次 PUT，顺序与池一致
   assert.deepStrictEqual(controllerPuts.map(p => p.name), LEAVES, '应按序切遍全部叶子节点，一次不多不少');
-  assert.ok(controllerPuts.every(p => p.url.includes('/proxies/')), 'PUT 目标应为组端点');
+  // (f/#9) 端点精确断言：PUT 必须打到 /proxies/{组名}（encodeURIComponent 后仍含组名），
+  // 而非「URL 含 :9090/proxies 即过」的恒真判断
+  for (const p of controllerPuts) {
+    assert.ok(p.url.endsWith(`:${'9090'}/proxies/${encodeURIComponent('PROXY')}`), `PUT 应打组端点 /proxies/PROXY，实际 ${p.url}`);
+  }
+  // (f/#7) 轮尽短路：页4/页5 已试遍快照，不应再打控制器 GET（首轮 1 次 GET + 换点期缓存单组端点）
+  // 精确次数随缓存路径浮动（首轮 fresh 发现 1 次 + 页2/页3 走 cached 单组端点），只锁上限：
+  // 若无短路，每个失败页至少一次控制器 GET，5 页双 405 场景会 ≥5 次
+  assert.ok(controllerGets <= 3, `轮尽后失败页应零控制器请求（实际 GET ${controllerGets} 次）`);
 
-  console.log('mihomo 节点轮换（只切叶子/不重复/轮尽熔断）: OK');
+  // (f/#1) 换点 destroy 只清本站缓存条目：模拟兄弟站共用同一 proxyUrl 的独立隧道
+  {
+    // mockAxios 已 restore，需先恢复真实 axios 再重载 crawler（_mihomo 顶层 require axios）
+    const { freshCrawler: fresh2 } = require('./helper');
+    const c = fresh2();
+    if (!c.getProxyAgents._cache) c.getProxyAgents._cache = new Map();
+    c.getProxyAgents._cache.set('yfbzb|http://mihomo:7890', { proxyUrl: 'http://mihomo:7890', httpAgent: { destroyed: false, destroy() { this.destroyed = true; } }, httpsAgent: { destroyed: false, destroy() { this.destroyed = true; } } });
+    c.getProxyAgents._cache.set('cebtest|http://mihomo:7890', { proxyUrl: 'http://mihomo:7890', httpAgent: { destroyed: false, destroy() { this.destroyed = true; } }, httpsAgent: { destroyed: false, destroy() { this.destroyed = true; } } });
+    const swCfg = { name: 'cebtest', proxy: 'http://mihomo:7890', switchProxy: async () => ({ switched: true, from: 'a', to: 'b', tried: ['b'], groupName: 'PROXY', leaves: ['a', 'b'] }) };
+    const out = await c.trySwitchProxy(swCfg, 'dual405');
+    assert.strictEqual(out.ok, true, 'provider 返回 switched 时 ok=true');
+    assert.strictEqual(c.getProxyAgents._cache.has('cebtest|http://mihomo:7890'), false, '本站缓存条目应被销毁移除');
+    assert.strictEqual(c.getProxyAgents._cache.get('yfbzb|http://mihomo:7890').httpAgent.destroyed, false, '兄弟站 Agent 不得被本站换点破坏（审查 #1）');
+  }
+
+  // (f/#3) 同站并发换点互斥：batchSize>1 时同批多个双 405 页同时进 trySwitchProxy，
+  // 读改写交错会重复选同一节点、tried 重复记账——串行化后每页拿到不同节点
+  {
+    let controllerCalls = 0;
+    const putNames = [];
+    // mockAxios 必须先于 freshCrawler：crawler/_mihomo 顶层钉死 axios 引用（见 mainBase (c) 注释）
+    const restore3 = mockAxios((url, config) => {
+      const u = String(url);
+      if (u.includes(':9090/proxies')) {
+        if (config && config.data !== undefined) {
+          // 模拟真实控制器延迟，放大并发窗口
+          return new Promise(resolve => setTimeout(() => {
+            const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
+            putNames.push(body.name);
+            resolve({ data: {}, status: 204 });
+          }, 10));
+        }
+        controllerCalls++;
+        return Promise.resolve({
+          data: {
+            proxies: {
+              PROXY: { type: 'Selector', now: 'auto', all: ['auto', 'N1', 'N2', 'N3', 'DIRECT'] },
+              auto: { type: 'URLTest', now: 'auto', all: ['N1', 'N2', 'N3'] },
+              N1: { type: 'Shadowsocks' }, N2: { type: 'Shadowsocks' }, N3: { type: 'Shadowsocks' },
+              DIRECT: { type: 'Direct' }
+            }
+          },
+          status: 200
+        });
+      }
+      const err = new Error('x'); err.response = { status: 500, data: '' }; throw err;
+    });
+    try {
+      const c = freshCrawler();
+      const cfg = { name: 'cebtest2', proxy: 'http://mihomo:7890' };
+      // 模拟同批 3 页双 405 并发换点
+      const outs = await Promise.all([
+        c.trySwitchProxy(cfg, 'dual405'),
+        c.trySwitchProxy(cfg, 'dual405'),
+        c.trySwitchProxy(cfg, 'dual405')
+      ]);
+      assert.deepStrictEqual(putNames.sort(), ['N1', 'N2', 'N3'], `并发换点应串行分派不同节点，实际 [${putNames.join(', ')}]`);
+      assert.ok(outs.every(o => o.ok === true), '三个并发换点都应成功');
+    } finally {
+      restore3();
+      delete sitesIndex.registry.cebtest2;
+    }
+  }
+
+  console.log('mihomo 节点轮换（只切叶子/不重复/轮尽熔断/端点精确/跨站隔离/并发互斥）: OK');
 }
 
 async function main() {

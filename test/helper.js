@@ -6,6 +6,9 @@ const Module = require('module');
 
 const AXIOS_PATH = require.resolve('axios');
 const CRAWLER_PATH = require('path').resolve(__dirname, '..', 'crawler.js');
+// sites/_mihomo.js 同样在顶层钉死 axios 引用（mihomo 换点 provider），
+// 需与 crawler 一并重载才能捕获当前 cache 里的 fake axios。
+const MIHOMO_PATH = require('path').resolve(__dirname, '..', 'sites', '_mihomo.js');
 
 function mockAxios(handler) {
   // handler: (url, config) => { data, status } | throws (网络错误则抛 axios 风格对象)
@@ -49,6 +52,7 @@ function mockAxios(handler) {
 // 让它在当前 cache（含 fake axios）下重新求值、重新捕获 axios。
 function freshCrawler() {
   delete require.cache[CRAWLER_PATH];
+  delete require.cache[MIHOMO_PATH];
   return require('../crawler');
 }
 

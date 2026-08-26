@@ -72,6 +72,26 @@
 - **权衡**: 轮尽后若 WAF 对全部出口均拦（如 ceb 按 IP 段封），行为退化为原「连续 2 页熔断」，止损语义不变；不引入健康度测速（避免对目标站发探测流量），以真实业务请求作为节点验证。
 - **验证**: `node test/dual405.test.js`（(a)-(e) 全过）+ `npm test` 7 套件全绿。
 
+## 修订 2026-08-26（同日二次）— 审查修复：跨站隧道隔离 / 键归一 / 并发互斥 / provider 化
+
+- **背景**: 同日代码审查对叶子轮换提交给出 10 条 findings，全部采纳修复：
+  1. 换点 destroy 的 keepAlive Agent 缓存按 proxyUrl 全局共享——全局 `HTTP_PROXY` 配法下 yfbzb/ceb 共用条目，ceb 换点会打断 yfbzb 在途请求并与其在同一 PROXY 组互抢出口直至误熔断；
+  2. 轮换记忆写键用原始 `siteConfig.name`、删键用 `normalizeSite(site)`，两推导链无归一保证——未来站点名不一致时删除永不命中，进程生命周期内永久假性 exhausted；
+  3. `batchSize>1` 时同批多个双 405 页并发进 `trySwitchProxy`，读改写交错重复选同一节点、tried 重复记账假性耗尽；
+  4. 组类型用拒绝清单（5 种），mihomo 新组型会被误判为叶子，「切组不打转」缺陷换个形态复发；
+  5. mihomo 专属逻辑（主机嗅探/控制器地址/组发现/GROUP_TYPES/secret）内联通用核心，未走站点策略钩子缝；
+  6. `proxyExhausted` 字段生产后无消费方；7. 轮尽后每失败页仍拉全量 `/proxies`；8. noSwitch 字面量 4 处形状不一；9. PUT 端点断言恒真；10. mock `now` 不反映 PUT 生效。
+- **变更**:
+  - `getProxyAgents` Agent 缓存键改 `<site>|<proxyUrl>`（#1）；换点只 destroy 前缀匹配本站的条目；`crawl()` 启动检测多站共用同一 proxyUrl 时告警 `proxy_shared_exit`（PROXY 组是控制器级单例，Agent 隔离解决不了组抢占，提示拆站代理）；
+  - 轮换记忆键统一 `rotateKey()`（trim+lowercase），写侧（trySwitchProxy）/删侧（crawl 开始 + 成功页）同一推导链（#2）；叶子快照 `_leafCache` 与轮换记忆同生命周期（成功页与每轮开始一并清空，防订阅变更后被旧快照锁死）；
+  - 新增 `_proxySwitchQueue` Promise 链互斥（#3）：同站并发换点串行化，每页分派不同未试节点；
+  - 叶子判定改**结构判定** `isLeafNode`：成员对象带 `all` 数组即组（#4），未来新组型自动排除；
+  - mihomo 知识下沉 `sites/_mihomo.js#switchNode`（#5），契约 `{noop}|{exhausted,...}|{switched,from,to,tried,groupName,leaves}`，可经 `siteConfig.switchProxy` 按站覆盖；编排层 `trySwitchProxy` 只做记账/互斥/隧道重建，返回统一经 `makeSwitchResult()` 工厂（#8）；
+  - 轮尽零请求短路（#7）：本轮已试遍快照全部叶子时不再打控制器；活跃切换期走单组端点 `/proxies/{group}` 取 now（小响应），全量 `/proxies` 仅首轮发现；
+  - `proxyExhausted` 在 `page_skipped` 结构化日志消费（#6）；测试 mock 维护真实 `now` 状态、PUT 断言精确到 `/proxies/{组名}` 端点与轮尽 GET 上限（#9/#10）、新增并发互斥与跨站隔离回归锁。
+- **权衡**: 多站共用单一 mihomo 出口的组抢占只能告警不能根治（需按站配不同代理入口或不同 provider 组），文档明示；叶子快照信任窗口限于一轮（成功页即清），订阅热更新最多多一次全量发现。
+- **验证**: `node test/dual405.test.js`（(a)-(f) 全过，含端点精确/轮尽短路上限/跨站隔离/并发互斥断言）+ `npm test` 7 套件全绿。
+
 ## 后果
 
 - 正面：换机器/重装可通过 `docker compose up -d` 常驻、`ghcr.io` 拉取、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。
