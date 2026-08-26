@@ -203,6 +203,21 @@ function resolveSiteConfig(siteOrConfig) {
   return getSiteConfig(siteOrConfig);
 }
 
+// 从成功页提取站点分页自报的真实总页数（可选钩子 parseTotalPages）。
+// 缺钩子/解析失败/非法值一律返回 undefined，爬取行为退化为仅受配置 totalPages 约束；
+// 钩子抛错只告警不致命（不得影响该页正常结果）。
+async function extractRealTotalPages(siteConfig, $, html) {
+  if (!siteConfig || typeof siteConfig.parseTotalPages !== 'function') return undefined;
+  const siteName = siteConfig.name || '';
+  try {
+    const v = await siteConfig.parseTotalPages.call(siteConfig, $, html, siteConfig);
+    return (Number.isInteger(v) && v > 0) ? v : undefined;
+  } catch (e) {
+    log(`站点 [${siteName}] parseTotalPages 钩子抛错，已忽略：${e.message}`, { level: 'warn', event: 'total_pages_hook_error', context: { site: siteName, error: e.message }, site: siteName });
+    return undefined;
+  }
+}
+
 async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existingIdsOrMaxRetries, maxRetriesArg) {
   // 兼容旧签名 crawlPage(pageNo, baseUrl, urlSuffix, existingIds, maxRetries)
   // 新签名 crawlPage(pageNo, siteConfig|site, existingIds, maxRetries)
@@ -297,26 +312,29 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
 
       // 优先使用站点自定义 parse 接管整页解析
       if (typeof siteConfig.parse === 'function') {
-        const pageData = await siteConfig.parse(cheerio.load(response.data), response.data, existingIds, siteConfig);
+        const $loaded = cheerio.load(response.data);
+        const pageData = await siteConfig.parse($loaded, response.data, existingIds, siteConfig);
         const filtered = Array.isArray(pageData) ? pageData.filter(item => !existingIds.has(item.id)) : [];
         log(`爬取完成第 ${pageNo} 页，共找到 ${filtered.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: filtered.length, site: siteName }, site: siteName });
-        return { pageData: filtered, failed: false };
+        const realTotalPages = await extractRealTotalPages(siteConfig, $loaded, response.data);
+        return { pageData: filtered, failed: false, realTotalPages };
       }
 
       const $ = cheerio.load(response.data);
+      const realTotalPages = await extractRealTotalPages(siteConfig, $, response.data);
       const selectors = siteConfig.selectors || require('./sites/yfbzb').selectors;
       const rows = $(selectors.rows);
 
       if (rows.length === 0) {
         log(`第 ${pageNo} 页没有找到任何数据`, { event: 'page_empty', context: { page: pageNo, site: siteName }, site: siteName });
-        return { pageData: [], failed: false };
+        return { pageData: [], failed: false, realTotalPages };
       }
 
       // 走默认 selectors 解析（委托 _base）
       const pageData = defaultParse($, response.data, existingIds, { ...siteConfig, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
 
       log(`爬取完成第 ${pageNo} 页，共找到 ${pageData.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: pageData.length, site: siteName }, site: siteName });
-      return { pageData, failed: false };
+      return { pageData, failed: false, realTotalPages };
     } catch (error) {
       if (isBoundary(error, siteConfig)) {
         log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
@@ -512,13 +530,17 @@ async function crawl(a, b, c, d) {
   // netFailSwitched：本轮连败是否已尝试过换 IP（保证熔断前至少真换一次，批次站单批即可越过换 IP 阈值）
   let netFailStreak = 0;
   let netFailSwitched = false;
+  // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
+  // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置
+  let realTotalPagesObserved;
+  let effectiveTotalPages = totalPages;
 
-  while (currentPage <= totalPages && !shouldStopCrawling) {
+  while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
     if (stopping) {
       stoppedBySignal = true;
       break;
     }
-    const pagesToCrawl = Math.min(batchSize, totalPages - currentPage + 1);
+    const pagesToCrawl = Math.min(batchSize, effectiveTotalPages - currentPage + 1);
     const crawlPromises = [];
 
     for (let i = 0; i < pagesToCrawl; i++) {
@@ -575,9 +597,23 @@ async function crawl(a, b, c, d) {
 
     currentPage += pagesToCrawl;
 
+    // 站点自报真实总页数合并：后观测覆盖前观测，每批重算有效上限；
+    // 收窄到低于当前页时由循环条件自然退出（等价于「已到底」）
+    for (const r of results) {
+      const rt = r && r.realTotalPages;
+      if (Number.isInteger(rt) && rt > 0) realTotalPagesObserved = rt;
+    }
+    if (realTotalPagesObserved !== undefined) {
+      const nextCap = Math.min(totalPages, realTotalPagesObserved);
+      if (nextCap !== effectiveTotalPages) {
+        effectiveTotalPages = nextCap;
+        log(`站点 [${site}] 分页显示真实总页数 ${realTotalPagesObserved}，按 min(${realTotalPagesObserved}, 配置 ${totalPages})=${nextCap} 页爬取`, { event: 'real_total_pages', context: { site, realTotalPages: realTotalPagesObserved, configuredTotalPages: totalPages, effectiveTotalPages: nextCap }, site });
+      }
+    }
+
     // 双 405 熔断：连续 2 页 GET→POST 均 405，判定为站点级拦截/配置失效，避免 100 页空转
     if (consecutive405 >= 2) {
-      log(`连续 ${consecutive405} 页 405（GET→POST 双 405），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${totalPages} 页，剩余 ${Math.max(0, totalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, triedPages: currentPage - 1, totalPages }, site });
+      log(`连续 ${consecutive405} 页 405（GET→POST 双 405），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
       // 网络连败换 IP：仅代理站点生效（trySwitchProxy 内部识别 mihomo，直连站为 no-op）。
@@ -588,7 +624,7 @@ async function crawl(a, b, c, d) {
       log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${switched ? '，已切换代理节点' : '，未配置可切换代理'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched }, site });
     } else if (netFailStreak >= NET_FAIL_BREAK_THRESHOLD && netFailSwitched) {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
-      log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${totalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages }, site });
+      log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
     } else if (batchEndReached) {
       endReached = true;
@@ -697,7 +733,8 @@ async function crawl(a, b, c, d) {
   const durationMs = Date.now() - startedAt;
   const totalPersisted = totalNew - failedIds.size;
   const crawlLevel = fileWriteFailed > 0 ? 'warn' : 'info';
-  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, site }, site });
+  const narrowedSuffix = realTotalPagesObserved !== undefined && effectiveTotalPages < totalPages ? `，站点总页数 ${realTotalPagesObserved}，按 ${effectiveTotalPages} 页停止` : '';
+  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${narrowedSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
 }
 
 function readRecentIds(site) {
@@ -722,4 +759,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };

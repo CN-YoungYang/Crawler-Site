@@ -40,7 +40,7 @@ node index.js [页数] [间隔时间(毫秒)] [最小延迟(秒)] [最大延迟(
 
 | 位置 | 参数 | 默认值 | 说明 |
 |------|------|--------|------|
-| 1 | 页数 | 100 | 最多爬取的页数 |
+| 1 | 页数 | 100 | 页数硬上限；站点分页自报真实总页数更小时按较小者提前停止 |
 | 2 | 间隔时间 | 5000 | 相邻批次之间的等待毫秒数 |
 | 3 | 最小延迟 | 0 | 爬取开始前的随机等待区间下限（秒） |
 | 4 | 最大延迟 | 300 | 爬取开始前的随机等待区间上限（秒） |
@@ -60,7 +60,7 @@ node index.js
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb,ceb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,ceb`（实站）或 `SITES=yfbzb,demo`（示例）；`SITE` 单站点兼容；未实现站点在多站点模式下 warn 跳过、单站点下 fail-fast |
-| `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_CEB=50`） |
+| `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1（硬上限；站点分页自报真实总页数更小时自动提前停止）；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_CEB=50`） |
 | `INTERVAL_MS` / `INTERVAL` | 5000 | 同位置参数 2；支持每站覆盖 `INTERVAL_MS_<SITE>` |
 | `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
 | `MAX_DELAY_S` / `MAX_DELAY` | 300 | 同位置参数 4；支持每站覆盖 `MAX_DELAY_S_<SITE>` |
@@ -138,12 +138,12 @@ server {
 1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
-   - **站点策略**：`sites/yfbzb.js` 实站（`axios`）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`proxy` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
+   - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`proxy` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
    - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 因固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL`（`http-proxy-agent/https-proxy-agent`，`NO_PROXY` 白名单）代理换 IP（`mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST` 并计入重试，双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷（代理下 405 仍触发熔断）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
-   - **终止条件**（三者满足其一即停）：
+   - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
-     - 已爬到 `totalPages`（CLI 页数边界）
+     - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
      - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
@@ -160,7 +160,7 @@ server {
 - 失败日志中此类页显示为“无新增数据（站点边界），已爬至当日末尾”，而非报错；
 - 真正的网络/超时错误才走重试与失败计数路径。
 
-当日真实数据边界以实际 403 为准；不要把站点展示的近 1 个月存量总数当作当日可访问页数。
+当日真实数据边界以实际 403 为准；不要把站点展示的近 1 个月存量总数当作当日可访问页数。真实总页数只取自分页控件（`.pagination` 子树内「共 N 条」÷ pageSize /「共 N 页」），绝不读统计横幅的存量总数（如 yfbzb「近1个月共76470条」）。
 
 ## GHCR 自动构建
 
@@ -191,7 +191,7 @@ server {
 ```
 crawler/
 ├── index.js              # 入口：环境变量/参数解析、校验、静态服务拉起、调度（CRON/单次常驻，每批后刷新导航）
-├── crawler.js            # 爬取核心：crawl() 编排 + crawlPage() 逐页抓取 + checkpoint（按站点）
+├── crawler.js            # 爬取核心：crawl() 编排（含真实总页数收窄上限）+ crawlPage() 逐页抓取 + checkpoint（按站点）
 ├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
 ├── report.js             # 报告：scanFiles/generateReport 按站点生成 HTML，generateNav/buildNavHtml 生成总导航 file/index.html
 ├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 进阶探针

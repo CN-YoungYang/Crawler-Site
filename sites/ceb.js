@@ -131,6 +131,17 @@ async function parse($, html, existingIds, siteConfig) {
   return pageData;
 }
 
+// 真实总页数：div.pagination 文本「共3页 当前页是第1页」。
+// 不读隐藏域 #pageTotal：历史快照中它与「共N页」矛盾（共3页 vs 50，疑为记录数或陈旧值）且值带尾随空格；
+// 以页面直接声明的「共N页」为准。
+function parseTotalPages($) {
+  const $pag = $('div.pagination').first();
+  if ($pag.length === 0) return null;
+  const m = /共(\d+)页/.exec(($pag.text() || '').replace(/\s+/g, ''));
+  const n = m ? parseInt(m[1], 10) : 0;
+  return n > 0 ? n : null;
+}
+
 module.exports = {
   name: 'ceb',
   displayName: '中国招标公共服务平台·湖北',
@@ -167,5 +178,6 @@ module.exports = {
   buildUrl,
   extractId,
   isBoundary,
-  parse
+  parse,
+  parseTotalPages
 };
