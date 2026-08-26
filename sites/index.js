@@ -4,7 +4,7 @@ const ceb = require('./ceb');
 const registry = { yfbzb, ceb };
 
 function normalizeSite(site) {
-  return (site || process.env.SITE || 'yfbzb').toLowerCase();
+  return String(site || process.env.SITE || 'yfbzb').trim().toLowerCase();
 }
 
 function normalizeSites(input) {

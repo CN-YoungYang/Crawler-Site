@@ -90,7 +90,7 @@ function getProxyAgents(siteConfig, targetUrl) {
   // 缓存键含站点：全局 HTTP_PROXY 配法下多站解析出同一 proxyUrl，若共用条目，
   // 一站换点 destroy 会打断兄弟站在途请求（2026-08-26 审查 #1）——各站独立隧道。
   if (!getProxyAgents._cache) getProxyAgents._cache = new Map();
-  const siteKey = normalizeSite((siteConfig && siteConfig.name) || '');
+  const siteKey = rotateKey((siteConfig && siteConfig.name) || '');
   const cacheKey = `${siteKey}|${proxyUrl}`;
   const cached = getProxyAgents._cache.get(cacheKey);
   if (cached) return cached;
@@ -290,6 +290,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   // 方法容错：仅显式开启 fallbackOn405 的站点才降级（如 ceb），避免 yfbzb 等 GET 站点误发 POST
   let method = String(siteConfig.method || 'GET').toUpperCase();
   let triedFallback = false;
+  let triedFirstPageSwitch = false;
 
   // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
   async function maybeThrottle() {
@@ -400,6 +401,13 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         // 单页即换 IP：mihomo 场景轮换取下一个未试叶子节点，避免攒够 consecutive405 才熔断
         let sw = makeSwitchResult();
         try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
+        // 第一页优先换 IP：第一页需获取总页码，换点成功后立即重试该页（不消耗额外批次）
+        if (pageNo === 1 && sw.ok && !triedFirstPageSwitch) {
+          triedFirstPageSwitch = true;
+          log(`第 1 页双 405 已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName }, site: siteName });
+          await new Promise(r => setTimeout(r, backoffDelay(0)));
+          continue;
+        }
         return { pageData: [], failed: true, status: errStatus, proxySwitched: !!sw.ok, proxyExhausted: !!sw.exhausted };
       }
       retries++;
@@ -408,6 +416,20 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries >= maxRetries) {
+        // 第一页优先换 IP：网络失败达上限后，第一页尝试换 IP 重试一次
+        if (pageNo === 1 && !triedFirstPageSwitch && (errStatus === undefined || errStatus === null)) {
+          let sw2 = makeSwitchResult();
+          try { sw2 = await trySwitchProxy(siteConfig, 'first_page_net_fail'); } catch (_) {}
+          if (sw2.ok) {
+            triedFirstPageSwitch = true;
+            log(`第 1 页网络失败已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName }, site: siteName });
+            retries = 0;
+            triedFallback = false;
+            method = String(siteConfig.method || 'GET').toUpperCase();
+            await new Promise(r => setTimeout(r, backoffDelay(0)));
+            continue;
+          }
+        }
         log(`第 ${pageNo} 页加载失败，已达到最大重试次数，跳过此页 [code=${error.code} status=${errStatus} method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
         return { pageData: [], failed: true, status: errStatus };
       }
@@ -415,6 +437,15 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     }
   }
   // 终局兜底：重试额度耗尽仍未返回（防御性），确保 crawlPage 永不隐式返回 undefined
+  // 第一页最终兜底的换 IP 重试
+  if (pageNo === 1 && !triedFirstPageSwitch) {
+    let sw3 = makeSwitchResult();
+    try { sw3 = await trySwitchProxy(siteConfig, 'first_page_exhausted'); } catch (_) {}
+    if (sw3.ok) {
+      log(`第 1 页重试额度耗尽后已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName }, site: siteName });
+      return crawlPage(pageNo, siteConfig, existingIds, maxRetries);
+    }
+  }
   log(`第 ${pageNo} 页加载失败，重试额度耗尽 [code=EXHAUSTED method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, method, site: siteName }, site: siteName });
   return { pageData: [], failed: true };
 }
@@ -529,6 +560,16 @@ async function crawl(a, b, c, d) {
   // 键统一走 rotateKey，与 trySwitchProxy 写侧一致（原写原始名/删 normalizeSite 名两链会错位——审查 #2）
   _proxyRotate.delete(rotateKey(site));
   if (getProxyAgents._leafCache) getProxyAgents._leafCache.delete(rotateKey(site));
+  _proxySwitchQueue.delete(rotateKey(site));
+  // 清理 _proxySharedExit 中已不在启用列表的站点，避免已下线站点持续触发 proxy_shared_exit 告警（#6）
+  try {
+    const { parseSitesList } = require('./sites');
+    const enabledSet = new Set(parseSitesList().map(s => s.toLowerCase()));
+    for (const [pUrl, set] of _proxySharedExit) {
+      for (const s of [...set]) { if (!enabledSet.has(s)) set.delete(s); }
+      if (set.size === 0) _proxySharedExit.delete(pUrl);
+    }
+  } catch (_) {}
   const batchSize = siteConfig.batchSize ?? BATCH_SIZE;
   const failureThreshold = siteConfig.failureThreshold ?? FAILURE_STOP_THRESHOLD;
   const startedAt = Date.now();
@@ -542,7 +583,7 @@ async function crawl(a, b, c, d) {
         log(`站点 [${site}] 已启用代理：${desensitizeProxyUrl(_proxyUrl)}`, { event: 'proxy_enabled', context: { site, proxy: desensitizeProxyUrl(_proxyUrl) }, site });
         // 多站共用同一代理出口时提示换点互踩风险：Agent 隧道已按站隔离（审查 #1），
         // 但 mihomo PROXY 组是控制器级单例——A 站切叶子会改变 B 站后续请求的出口
-        const siteKey = normalizeSite(site);
+        const siteKey = rotateKey(site);
         if (!_proxySharedExit.has(_proxyUrl)) _proxySharedExit.set(_proxyUrl, new Set());
         _proxySharedExit.get(_proxyUrl).add(siteKey);
         const siblings = [..._proxySharedExit.get(_proxyUrl)].filter(s => s !== siteKey);
@@ -633,6 +674,7 @@ async function crawl(a, b, c, d) {
       netFailSwitched = false;
       _proxyRotate.delete(rotateKey(site));
       if (getProxyAgents._leafCache) getProxyAgents._leafCache.delete(rotateKey(site));
+      _proxySwitchQueue.delete(rotateKey(site));
 
       if (ended) {
         batchEndReached = true;

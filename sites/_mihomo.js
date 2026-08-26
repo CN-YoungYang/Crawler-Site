@@ -29,6 +29,33 @@ function authHeaders() {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+// 订阅刷新限频：避免 0 叶子/连败风暴中每页都打 PUT
+let _providerRefreshAt = 0;
+function refreshCooldownMs() {
+  const v = Number(process.env.MIHOMO_REFRESH_COOLDOWN);
+  return (Number.isFinite(v) && v >= 0 ? v : 600) * 1000;
+}
+async function refreshProviders({ site = '', reason = '' } = {}) {
+  const now = Date.now();
+  const cd = refreshCooldownMs();
+  if (now - _providerRefreshAt < cd) return false;
+  _providerRefreshAt = now;
+  const headers = authHeaders();
+  const bases = controllerBases();
+  const paths = ['/providers/proxy/remote', '/providers/proxies/remote'];
+  for (const base of bases) {
+    for (const p of paths) {
+      try {
+        await axios.put(`${base}${p}`, {}, { timeout: 2000, headers, proxy: false });
+        log(`已触发订阅刷新 [${site}] ${reason} → PUT ${base}${p}`, { event: 'proxy_provider_refresh', context: { site, reason, endpoint: `${base}${p}` }, site });
+        return true;
+      } catch (_) { /* try next endpoint */ }
+    }
+  }
+  log(`订阅刷新失败 [${site}] ${reason}，将等待下次周期或下次触发`, { level: 'warn', event: 'proxy_provider_refresh_failed', context: { site, reason }, site });
+  return false;
+}
+
 // 组定位：有缓存走单组端点 /proxies/{group} 取最新 now（小响应）；
 // 无缓存或单组端点异常（组被删/改名）则全量 /proxies 重发现并分类叶子。
 async function locateGroup(base, headers, cached) {
@@ -39,7 +66,6 @@ async function locateGroup(base, headers, cached) {
       if (g && Array.isArray(g.all)) {
         return { groupName: cached.groupName, now: g.now || '', leaves: cached.leaves || [] };
       }
-      // 结构异常 → 落到全量重发现
     } catch (_) { /* 缓存失效 → 全量重发现 */ }
   }
   const listRes = await axios.get(`${base}/proxies`, { timeout: 2000, headers, proxy: false });
@@ -50,6 +76,10 @@ async function locateGroup(base, headers, cached) {
   const leaves = group.all.filter(n => {
     const lower = String(n).toLowerCase();
     if (lower === 'direct' || lower.startsWith('reject')) return false;
+    if (proxies[n] === undefined) {
+      log(`代理叶子缺失字典条目 [${groupName}] ${n}，视为叶子尝试`, { level: 'warn', event: 'proxy_leaf_missing', context: { group: groupName, leaf: n } });
+      return true;
+    }
     return isLeafNode(proxies[n]);
   });
   return { groupName, now: group.now || '', leaves };
@@ -58,41 +88,50 @@ async function locateGroup(base, headers, cached) {
 // 叶子判定用结构而非类型名单：成员对象带 all 数组即「组」（Selector/URLTest/Fallback/
 // LoadBalance/Relay 及未来新组型如 Smart 一律命中——切组等于把出口选择权交还组，
 // 可能立刻回到被封节点）；无 all 的真实协议节点才是叶子。（2026-08-26 审查 #4）
+// #1: 调用方已处理 undefined，此处仅处理已存在的 member 对象
 function isLeafNode(member) {
-  return !!(member && typeof member === 'object' && !Array.isArray(member.all));
+  if (member === undefined || member === null) return true;
+  return !!(typeof member === 'object' && !Array.isArray(member.all));
 }
 
 async function switchNode(siteConfig, { reason, proxyUrl, tried, cached }) {
   if (!proxyUrl || !isMihomoProxyUrl(proxyUrl)) return { noop: true };
   const site = (siteConfig && siteConfig.name) || '';
   const headers = authHeaders();
-  // 轮尽零请求短路：本轮 PUT 已试遍快照全部叶子（成功页会清空轮换记忆，
-  // 故 tried.length ≥ leaves.length 只可能发生在轮尽后），不再打控制器
+  // #7: 轮尽零请求短路——stale 快照可能导致假轮尽（订阅新增叶子但 tried 已覆盖旧快照），
+  // 但额外 GET 会破坏轮尽后零控制器请求的性能保证（测试 dual405 断言 <=3 GETs）。
+  // 权衡：短路仍直接判轮尽，stale 场景由下一轮 crawl() 重置 _leafCache 或下一页的全量兜底发现。
+  // 若需强一致，可在外部定期失效缓存，而非每次轮尽都多一次 GET。
   const snapLeaves = cached && cached.leaves;
   if (Array.isArray(snapLeaves) && snapLeaves.length > 0 && snapLeaves.every(n => tried.includes(n))) {
+    const fromVal = (cached && cached.now) || (snapLeaves.includes(tried[tried.length - 1]) ? tried[tried.length - 1] : '');
     log(`代理节点池本轮已轮尽 [${site}] ${reason}（叶子 ${snapLeaves.length} 个，本轮已试 ${tried.length}），不再换点`, { level: 'warn', event: 'proxy_pool_exhausted', context: { site, reason, leaves: snapLeaves.length, tried: tried.length }, site });
-    return { exhausted: true, from: snapLeaves.includes(tried[tried.length - 1]) ? tried[tried.length - 1] : '', tried: [...tried], groupName: cached.groupName, leaves: snapLeaves };
+    return { exhausted: true, from: fromVal, tried: [...tried], groupName: cached.groupName, leaves: snapLeaves };
   }
   for (const base of controllerBases()) {
-    // 有缓存先走单组端点，任何异常（端点失效/PUT 失败）或缓存下轮尽，退回全量重发现兜底一次
     for (const cacheAttempt of (cached && cached.groupName ? [cached, null] : [null])) {
       try {
         const loc = await locateGroup(base, headers, cacheAttempt);
-        if (!loc) break; // 此控制器没有 PROXY 组，试下一个控制器
+        if (!loc) break;
+        // 叶子池为空时直接视为 noop（订阅未加载/过滤后无可用节点），避免 0 叶子判轮尽误导
+        if (loc.leaves.length === 0) {
+          if (cacheAttempt) continue;
+          log(`代理叶子池为空 [${site}] ${reason}，无法换点`, { level: 'warn', event: 'proxy_pool_empty', context: { site, reason, group: loc.groupName }, site });
+          try { await refreshProviders({ site, reason: `pool_empty:${reason}` }); } catch (_) {}
+          return { noop: true };
+        }
         const pool = loc.leaves.filter(n => n !== loc.now && !tried.includes(n));
         if (pool.length === 0) {
-          if (cacheAttempt) continue; // 缓存叶子快照可能过期（订阅变更），全量重发现后再判轮尽
+          if (cacheAttempt) continue;
           log(`代理节点池本轮已轮尽 [${site}] ${reason}（叶子 ${loc.leaves.length} 个，本轮已试 ${tried.length}），不再换点`, { level: 'warn', event: 'proxy_pool_exhausted', context: { site, reason, leaves: loc.leaves.length, tried: tried.length }, site });
           return { exhausted: true, from: loc.now, tried: [...tried], groupName: loc.groupName, leaves: loc.leaves };
         }
         const next = pool[0];
         await axios.put(`${base}/proxies/${encodeURIComponent(loc.groupName)}`, { name: next }, { timeout: 2000, headers, proxy: false });
-        // PUT 成功才记账：控制器异常时下一个控制器可重选同名节点，不留幽灵占位
         const newTried = [...tried, next];
         log(`代理已切换 [${site}] ${reason}：${loc.now || 'unknown'} → ${next}（本轮已试 ${newTried.length}/${loc.leaves.length}）`, { event: 'proxy_switched', context: { site, from: loc.now, to: next, reason, controller: base, tried: newTried.length, leaves: loc.leaves.length }, site });
-        return { switched: true, from: loc.now, to: next, tried: newTried, groupName: loc.groupName, leaves: loc.leaves };
+        return { switched: true, from: loc.now, to: next, tried: newTried, groupName: loc.groupName, leaves: loc.leaves, now: loc.now };
       } catch (_) {
-        // 还有全量兜底就重试，否则下一个控制器
         continue;
       }
     }
@@ -101,4 +140,4 @@ async function switchNode(siteConfig, { reason, proxyUrl, tried, cached }) {
   return { noop: true };
 }
 
-module.exports = { switchNode, isMihomoProxyUrl };
+module.exports = { switchNode, isMihomoProxyUrl, isLeafNode, refreshProviders, _refreshCooldown: () => _providerRefreshAt, _resetRefreshCooldown: () => { _providerRefreshAt = 0; } };

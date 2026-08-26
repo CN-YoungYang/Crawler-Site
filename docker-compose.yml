@@ -1,16 +1,24 @@
 services:
-  # 可选代理 sidecar：Oracle 固定 IP 被 ceb WAF 拦时，启用此服务将远端 clash_fast.yaml 转为本地 HTTP 代理
+  # 代理 sidecar：Oracle 固定 IP 被 ceb WAF 拦时，mihomo 将远端 clash_fast.yaml 转为本地 HTTP 代理
   # 远端订阅由 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml（另一台机器定时更新）提供
-  # 启用方式：取消本段注释，准备 ./mihomo/config.yaml（cp mihomo/config.yaml.example），然后 compose up
-  # mihomo:
-  #   image: metacubex/mihomo:latest
-  #   container_name: mihomo
-  #   volumes:
-  #     - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
-  #   ports:
-  #     - "7890:7890"   # mixed-port，供 crawler 的 HTTP_PROXY=http://mihomo:7890 消费
-  #     - "9090:9090"   # external-controller，可选
-  #   restart: unless-stopped
+  # 默认启用；如需直连可注释本段并移除 crawler 的 HTTP_PROXY/CEB_PROXY_URL
+  # 启用步骤：cp mihomo/config.yaml.example mihomo/config.yaml && 按需编辑订阅 URL && docker compose up -d --build
+  # 验证：curl http://127.0.0.1:7890/proxies | jq / curl -s http://127.0.0.1:9090/proxies | jq '.proxies.PROXY.all | length'
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: mihomo
+    volumes:
+      - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
+    ports:
+      - "7890:7890"   # mixed-port，供 crawler 的 HTTP_PROXY=http://mihomo:7890 消费
+      - "9090:9090"   # external-controller
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/proxies >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   crawler:
     image: rxyoungyang/crawler:latest
@@ -32,6 +40,9 @@ services:
       - NO_PROXY=${NO_PROXY:-}
       - PROXY_CEB=${PROXY_CEB:-}
       - CEB_PROXY_URL=${CEB_PROXY_URL:-}
+      - MIHOMO_REFRESH_COOLDOWN=${MIHOMO_REFRESH_COOLDOWN:-}
+      - MIHOMO_CONTROLLER=${MIHOMO_CONTROLLER:-}
+      - MIHOMO_SECRET=${MIHOMO_SECRET:-}
     ports:
       - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
     volumes:
@@ -43,6 +54,9 @@ services:
       # - ./state-site2.json:/app/state-site2.json
       # 代理 sidecar 配置（启用 mihomo 时挂载）
       # - ./mihomo/config.yaml:/app/mihomo-config.yaml:ro
+    depends_on:
+      mihomo:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
