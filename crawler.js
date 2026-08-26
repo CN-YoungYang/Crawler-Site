@@ -105,15 +105,24 @@ function getProxyAgents(siteConfig, targetUrl) {
   }
 }
 
-// 单页双 405 秒级换 IP：仅 mihomo 场景，通过 external-controller 切节点
+// 双 405/网络连败的秒级换 IP：仅 mihomo 场景，通过 external-controller 切节点。
+// 轮换语义（2026-08-25 生产教训：池仅 {auto, 香港} 时「第一个非当前候选」来回打转，
+// 且切到 auto 这类组等于把出口选择权交还 URLTest，可能立刻回到被封节点）：
+// - 只切真实叶子节点：排除 DIRECT/REJECT 及 Selector/URLTest/Fallback/LoadBalance/Relay 组类型；
+// - 同一轮（两次成功页之间）不重复已试节点，按组内顺序依次轮换；
+// - 轮尽不再切换并返回 exhausted（事件 proxy_pool_exhausted），由调用方累计失败自然熔断。
+// 返回 {ok, from, to, exhausted}；ok=true 表示本次真的切换了节点。
+const _proxyRotate = new Map(); // siteName -> 本轮已试叶子节点名数组
+
 async function trySwitchProxy(siteConfig, reason) {
+  const noSwitch = { ok: false, from: '', to: '', exhausted: false };
   const proxyUrl = resolveProxyUrl(siteConfig);
-  if (!proxyUrl) return false;
+  if (!proxyUrl) return noSwitch;
   const siteName = (siteConfig && siteConfig.name) || '';
   let host = '';
-  try { host = new URL(proxyUrl).hostname.toLowerCase(); } catch (_) { return false; }
+  try { host = new URL(proxyUrl).hostname.toLowerCase(); } catch (_) { return noSwitch; }
   const isMihomo = host === 'mihomo' || host === '127.0.0.1' || host === 'localhost' || proxyUrl.includes('mihomo:7890') || proxyUrl.includes('127.0.0.1:7890');
-  if (!isMihomo) return false;
+  if (!isMihomo) return noSwitch;
   const controllers = [];
   if (process.env.MIHOMO_CONTROLLER) controllers.push(process.env.MIHOMO_CONTROLLER);
   controllers.push('http://mihomo:9090', 'http://127.0.0.1:9090');
@@ -124,25 +133,48 @@ async function trySwitchProxy(siteConfig, reason) {
       // 取当前组与可用节点
       const listRes = await axios.get(`${base}/proxies`, { timeout: 2000, headers, proxy: false });
       const proxies = listRes.data && listRes.data.proxies ? listRes.data.proxies : {};
-      const group = proxies.PROXY || proxies.proxy || null;
-      if (!group) continue;
+      const groupName = Object.keys(proxies).find(k => k.toUpperCase() === 'PROXY') || '';
+      const group = groupName ? proxies[groupName] : null;
+      if (!group || !Array.isArray(group.all)) continue;
       const now = group.now || '';
-      // 收集可切目标：优先同组 all，其次 remote 池
-      const candidates = [];
-      if (Array.isArray(group.all)) candidates.push(...group.all);
-      // 从 providers/remote 也可枚举，但 all 已含 use: remote 的展开
-      const next = candidates.find(n => n !== now && n !== 'DIRECT' && n.toLowerCase() !== 'direct') || candidates.find(n => n !== now);
-      if (!next) continue;
-      await axios.put(`${base}/proxies/PROXY`, { name: next }, { timeout: 2000, headers, proxy: false });
-      log(`代理已切换 [${siteName}] ${reason}：${now || 'unknown'} → ${next}`, { event: 'proxy_switched', context: { site: siteName, from: now, to: next, reason, controller: base }, site: siteName });
-      return true;
+      // 叶子候选：切到组类型不产生新出口（auto 等会自行解析回原节点），连同 DIRECT/REJECT 一并排除
+      const GROUP_TYPES = new Set(['selector', 'urltest', 'fallback', 'loadbalance', 'relay']);
+      const leaves = group.all.filter(n => {
+        const lower = String(n).toLowerCase();
+        if (lower === 'direct' || lower.startsWith('reject')) return false;
+        const p = proxies[n];
+        const t = p && typeof p.type === 'string' ? p.type.toLowerCase() : '';
+        return !GROUP_TYPES.has(t);
+      });
+      const tried = _proxyRotate.get(siteName) || [];
+      const pool = leaves.filter(n => n !== now && !tried.includes(n));
+      if (pool.length === 0) {
+        log(`代理节点池本轮已轮尽 [${siteName}] ${reason}（叶子 ${leaves.length} 个，本轮已试 ${tried.length}），不再换点`, { level: 'warn', event: 'proxy_pool_exhausted', context: { site: siteName, reason, leaves: leaves.length, tried: tried.length }, site: siteName });
+        return { ok: false, from: now, to: '', exhausted: true };
+      }
+      const next = pool[0];
+      await axios.put(`${base}/proxies/${encodeURIComponent(groupName)}`, { name: next }, { timeout: 2000, headers, proxy: false });
+      // PUT 成功才记账：控制器异常时下一个控制器可重选同名节点，不留幽灵占位
+      tried.push(next);
+      _proxyRotate.set(siteName, tried);
+      // 换点后废弃旧隧道长连接：keepAlive 的代理 socket 仍指向旧出口，不复位会继续用旧 IP 请求
+      if (getProxyAgents._cache) {
+        const entry = getProxyAgents._cache.get(proxyUrl);
+        if (entry) {
+          try { entry.httpAgent.destroy(); } catch (_) {}
+          try { entry.httpsAgent.destroy(); } catch (_) {}
+          getProxyAgents._cache.delete(proxyUrl);
+        }
+      }
+      log(`代理已切换 [${siteName}] ${reason}：${now || 'unknown'} → ${next}（本轮已试 ${tried.length}/${leaves.length}）`, { event: 'proxy_switched', context: { site: siteName, from: now, to: next, reason, controller: base, tried: tried.length, leaves: leaves.length }, site: siteName });
+      return { ok: true, from: now, to: next, exhausted: false };
     } catch (e) {
       // 试下一个控制器
       continue;
     }
   }
   log(`代理切换失败 [${siteName}] ${reason}`, { level: 'warn', event: 'proxy_switch_failed', context: { site: siteName, reason }, site: siteName });
-  return false;
+  return noSwitch;
 }
 
 // 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
@@ -369,9 +401,10 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         const snippet405 = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
         const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
         log(`第 ${pageNo} 页 POST 仍 405（GET→POST 双 405），不再重试直接跳过 [code=${error.code} status=${errStatus} method=${method}${extra405}]`, { level: 'error', event: 'page_failed_dual405', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
-        // 单页即换 IP：mihomo 场景下秒级切节点，避免攒够 consecutive405 才熔断
-        try { await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
-        return { pageData: [], failed: true, status: errStatus };
+        // 单页即换 IP：mihomo 场景轮换取下一个未试叶子节点，避免攒够 consecutive405 才熔断
+        let sw = { ok: false, exhausted: false };
+        try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
+        return { pageData: [], failed: true, status: errStatus, proxySwitched: !!sw.ok, proxyExhausted: !!sw.exhausted };
       }
       retries++;
       const backoff = backoffDelay(retries - 1);
@@ -490,6 +523,8 @@ function normalizeCrawlArgs(a, b, c, d) {
 async function crawl(a, b, c, d) {
   const { site, totalPages, interval, maxRetries } = normalizeCrawlArgs(a, b, c, d);
   const siteConfig = getSiteConfig(site);
+  // 每轮运行清空换点轮换记忆：上轮试过的节点本轮允许重新尝试（WAF 封禁状态随时间变化）
+  _proxyRotate.delete(site);
   const batchSize = siteConfig.batchSize ?? BATCH_SIZE;
   const failureThreshold = siteConfig.failureThreshold ?? FAILURE_STOP_THRESHOLD;
   const startedAt = Date.now();
@@ -526,6 +561,8 @@ async function crawl(a, b, c, d) {
   let totalFailed = 0;
   let endReached = false;
   let consecutive405 = 0;
+  // 双 405 触发的成功换点次数（单轮运行内）：换点成功即重置 consecutive405 给新出口观察页
+  let proxy405Switches = 0;
   // 网络级连败（ECONNRESET/超时等无 status 失败）：代理站点达阈值换 IP，再连败至翻倍熔断；成功/边界页清零。
   // netFailSwitched：本轮连败是否已尝试过换 IP（保证熔断前至少真换一次，批次站单批即可越过换 IP 阈值）
   let netFailStreak = 0;
@@ -559,8 +596,16 @@ async function crawl(a, b, c, d) {
       if (failed) {
         failedCount++;
         totalFailed++;
-        if (status === 405) consecutive405++;
-        // 非 405 失败不重置，避免 405/超时交替时永不熔断
+        // 405 连击：换点成功即清零（给新出口一个完整请求的观察窗，避免未验证先熔断），否则累计
+        if (status === 405) {
+          if (results[i].proxySwitched) {
+            consecutive405 = 0;
+            proxy405Switches++;
+            log(`第 ${pageNo} 页双 405 但已换 IP，重置连续拦截计数，新出口观察中（本轮已换 ${proxy405Switches} 次）`, { level: 'warn', event: 'proxy_switched_reset_405', context: { page: pageNo, site, switches: proxy405Switches }, site });
+          } else {
+            consecutive405++;
+          }
+        }
         log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status }, site });
         // 网络级失败（无 status：ECONNRESET/超时/TLS 断开）计数，代理站点达阈值换 IP、再连败熔断；
         // 有 status 的失败（403/405 等已到服务器）说明链路连通，不计入
@@ -568,10 +613,11 @@ async function crawl(a, b, c, d) {
         continue;
       }
 
-      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数
+      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，并清空换点轮换记忆（下轮可从头再试各节点）
       consecutive405 = 0;
       netFailStreak = 0;
       netFailSwitched = false;
+      _proxyRotate.delete(site);
 
       if (ended) {
         batchEndReached = true;
@@ -611,17 +657,17 @@ async function crawl(a, b, c, d) {
       }
     }
 
-    // 双 405 熔断：连续 2 页 GET→POST 均 405，判定为站点级拦截/配置失效，避免 100 页空转
+    // 双 405 熔断：换点轮换耗尽后仍连续 2 页 GET→POST 均 405，判定为站点级拦截，避免 100 页空转
     if (consecutive405 >= 2) {
-      log(`连续 ${consecutive405} 页 405（GET→POST 双 405），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
       // 网络连败换 IP：仅代理站点生效（trySwitchProxy 内部识别 mihomo，直连站为 no-op）。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
-      let switched = false;
-      try { switched = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}
+      let sw = { ok: false };
+      try { sw = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}
       netFailSwitched = true;
-      log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${switched ? '，已切换代理节点' : '，未配置可切换代理'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched }, site });
+      log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched: !!sw.ok }, site });
     } else if (netFailStreak >= NET_FAIL_BREAK_THRESHOLD && netFailSwitched) {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
       log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });

@@ -62,6 +62,16 @@
 - **权衡**: 镜像回到轻量、无 `chromium` 体积/内存负担；换 IP 才是对 IP 段封禁的根治，代理仅 `ceb` 按需启用，不影响 `yfbzb` 直连。
 - **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；`npm test` 6 套件全绿。
 
+## 修订 2026-08-26 — mihomo 换点叶子轮换（修复 auto↔节点来回打转）
+
+- **背景**: 2026-08-25 生产日志：ceb 第 1 页双 405 换点 `auto → 🇭🇰香港`，第 2 页双 405 又换回 `🇭🇰香港 → auto`，随即连续 2 页 405 熔断放弃剩余 98 页。两个缺陷：① `trySwitchProxy` 取「第一个不等于当前的候选」，池仅 `{auto, 香港}` 时二选一来回打转，且切到 `auto`（URLTest 组）等于把出口选择权交还测速、可能立刻回到被封 IP；② 换点成功后 `consecutive405` 不清零，新出口未获一次完整请求的观察机会即被计数判死。
+- **变更**:
+  - `crawler.js#trySwitchProxy` 改为**叶子节点轮换**并返回 `{ok, from, to, exhausted}`：候选排除 `DIRECT`/`REJECT` 与组类型（Selector/URLTest/Fallback/LoadBalance/Relay），同轮（两次成功页之间）不重复已试节点、按组内顺序依次切换；轮尽不再切并记 `proxy_pool_exhausted`。PUT 成功才记账（控制器异常时下一控制器可重选同名节点）；换点成功即 destroy 该代理 URL 的 keepAlive Agent 并移除缓存（旧隧道 socket 仍指向旧出口）；每轮 `crawl()` 开始清空该站轮换记忆，成功页亦清空（WAF 封禁状态随时间变化）。
+  - `crawlPage` 双 405 返回携带 `proxySwitched`/`proxyExhausted`；`crawl()` 中双 405 且本次换点成功 → 重置 `consecutive405` 给新出口观察窗，否则累计；熔断日志附本轮已换次数（事件 `proxy_switched_reset_405`）。
+  - 测试 `test/dual405.test.js` 新增 (d)(e)：mock mihomo 控制器断言按序切遍全部叶子、一次不多不少、绝不碰 `auto`/`DIRECT`；轮尽后连续 2 页 405 才熔断。
+- **权衡**: 轮尽后若 WAF 对全部出口均拦（如 ceb 按 IP 段封），行为退化为原「连续 2 页熔断」，止损语义不变；不引入健康度测速（避免对目标站发探测流量），以真实业务请求作为节点验证。
+- **验证**: `node test/dual405.test.js`（(a)-(e) 全过）+ `npm test` 7 套件全绿。
+
 ## 后果
 
 - 正面：换机器/重装可通过 `docker compose up -d` 常驻、`ghcr.io` 拉取、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。

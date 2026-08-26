@@ -184,7 +184,7 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + 代理换 IP（`HTTP_PROXY/CEB_PROXY_URL`），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + 代理换 IP（`HTTP_PROXY/CEB_PROXY_URL`；mihomo 下双 405 单页即按序轮换未试过的叶子节点，切组/auto 不算换 IP，轮尽才熔断，成功页清空轮换记忆），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 

@@ -23,6 +23,10 @@ function mockAxios(handler) {
     const merged = { ...(config || {}), data };
     return handler(url, merged);
   };
+  fake.put = (url, data, config) => {
+    const merged = { ...(config || {}), data };
+    return handler(url, merged);
+  };
   fake.request = (config) => handler(config.url, config);
   fake.create = () => fake;
   // 覆盖 require.cache

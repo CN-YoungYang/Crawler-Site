@@ -161,7 +161,7 @@ module.exports = {
   // 405 容错：GET 被 WAF 拒时自动降级为 POST
   method: 'GET',
   fallbackOn405: true,
-  // 代理换 IP 绕过 WAF（甲骨文固定 IP 被拦时设 HTTP_PROXY / CEB_PROXY_URL 走 mihomo sidecar）
+  // 代理换 IP 绕过 WAF（甲骨文固定 IP 被拦时设 HTTP_PROXY / CEB_PROXY_URL 走 mihomo sidecar；双 405 触发叶子节点轮换取新出口）
   // 例：HTTP_PROXY=http://127.0.0.1:7890 或 CEB_PROXY_URL=http://127.0.0.1:7890（mihomo 加载 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml）
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
