@@ -1,4 +1,4 @@
-const { crawl, isStopping, sleepInterruptible } = require('./crawler');
+const { crawl, isStopping, sleepInterruptible, refreshProxyProviders } = require('./crawler');
 const { generateReport, generateNav } = require('./report');
 const { log } = require('./log');
 const { startServer } = require('./server');
@@ -335,6 +335,12 @@ if (require.main === module) {
   // 尽力预生成导航页，使域名访问立即可用（不阻塞爬取调度）
   generateNav(env.sites).catch(e => {
     log(`预生成导航页失败: ${e.message}`, { level: 'warn', event: 'nav_pre_failed', context: { error: e.message } });
+  });
+  // 启动先拉取订阅更新：mihomo 节点池随远端 clash_fast.yaml 变动，先刷新保证首轮换点（第一页探针）拿到最新节点。
+  // 不阻塞调度（fire-and-forget）；crawl() 每轮开始也会刷新兜底，失败由 refreshProviders 内部告警
+  Promise.all(env.sites.map(s => refreshProxyProviders(s))).then(results => {
+    const refreshed = results.filter(Boolean).length;
+    if (refreshed) log(`启动订阅刷新完成：${refreshed}/${env.sites.length} 个代理站点已拉取最新订阅`, { event: 'startup_refresh_done', context: { refreshed } });
   });
   // 优雅关闭：随爬虫 stopping 一并关闭 HTTP 服务
   if (httpServer) {

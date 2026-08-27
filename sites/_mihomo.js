@@ -39,7 +39,6 @@ async function refreshProviders({ site = '', reason = '' } = {}) {
   const now = Date.now();
   const cd = refreshCooldownMs();
   if (now - _providerRefreshAt < cd) return false;
-  _providerRefreshAt = now;
   const headers = authHeaders();
   const bases = controllerBases();
   const paths = ['/providers/proxy/remote', '/providers/proxies/remote'];
@@ -47,6 +46,9 @@ async function refreshProviders({ site = '', reason = '' } = {}) {
     for (const p of paths) {
       try {
         await axios.put(`${base}${p}`, {}, { timeout: 2000, headers, proxy: false });
+        // 仅成功才记冷却：失败的刷新（如控制器未就绪）不应阻塞下次重试，
+        // 否则程序启动时 mihomo 未就绪会连带 600s 内的 crawl_start 刷新也被吞
+        _providerRefreshAt = now;
         log(`已触发订阅刷新 [${site}] ${reason} → PUT ${base}${p}`, { event: 'proxy_provider_refresh', context: { site, reason, endpoint: `${base}${p}` }, site });
         return true;
       } catch (_) { /* try next endpoint */ }

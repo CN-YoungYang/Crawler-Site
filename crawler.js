@@ -213,6 +213,18 @@ async function trySwitchProxy(siteConfig, reason) {
   });
 }
 
+// 启动/每轮爬取前刷新 mihomo 订阅（远端 clash_fast.yaml 变动会改变节点池）。
+// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（refreshProviders 内部限频，不会频繁打 PUT）。
+async function refreshProxyProviders(site) {
+  let siteConfig;
+  try { siteConfig = getSiteConfig(site); } catch (_) { return false; }
+  const proxyUrl = resolveProxyUrl(siteConfig);
+  if (!proxyUrl || !mihomo.isMihomoProxyUrl(proxyUrl)) return false;
+  try {
+    return await mihomo.refreshProviders({ site: normalizeSite(site), reason: 'startup' });
+  } catch (_) { return false; }
+}
+
 // shanghaiDateStr 已收敛至 utils.js（Intl 标准库）
 
 // hasValidXlsxHeader 已收敛至 utils.js
@@ -299,6 +311,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
 
   if (!existingIds) existingIds = new Set();
   const siteName = siteConfig.name || normalizeSite(siteConfig.name);
+  // 第一页探针：pageNo===1 时若当前出口失败则一路换点，直到成功或节点池轮尽（见下方失败处理）
+  const isFirstPage = pageNo === 1;
   const isBoundary = siteConfig.isBoundary || defaultIsBoundary;
   const linkPrefix = siteConfig.linkPrefix || '';
   const timeout = siteConfig.timeout ?? REQUEST_TIMEOUT;
@@ -383,8 +397,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         return { pageData: [], failed: false, realTotalPages };
       }
 
-      // 走默认 selectors 解析（委托 _base）
-      const pageData = defaultParse($, response.data, existingIds, { ...siteConfig, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
+      // 走默认 selectors 解析（委托 _base）；显式传入解析后的 selectors（含 yfbzb 兜底），
+      // 否则缺 selectors 的站点（如旧签名/测试站点）行数检查通过但解析拿到空行
+      const pageData = defaultParse($, response.data, existingIds, { ...siteConfig, selectors, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
 
       log(`爬取完成第 ${pageNo} 页，共找到 ${pageData.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: pageData.length, site: siteName }, site: siteName });
       return { pageData, failed: false, realTotalPages };
@@ -425,6 +440,16 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         // 单页即换 IP：mihomo 场景轮换取下一个未试叶子节点，避免攒够 consecutive405 才熔断
         let sw = makeSwitchResult();
         try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
+        // 第一页探针：当前出口被 WAF 拦就一路换点，直到成功或节点池轮尽（轮尽=后续页同样被拦，取消本次抓取）
+        if (isFirstPage && (sw.ok || sw.exhausted)) {
+          if (sw.exhausted) {
+            log(`第 1 页在所有节点上均被拦（双 405），判定出口全被拦截，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, status: errStatus, site: siteName }, site: siteName });
+            return { pageData: [], failed: true, status: errStatus, proxyExhausted: true, gateAbort: true };
+          }
+          log(`第 1 页双 405 已换 IP（${sw.from} → ${sw.to}），继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName }, site: siteName });
+          await new Promise(r => setTimeout(r, backoffDelay(0)));
+          continue;
+        }
         // 换点后重置重试该页（不限于第1页），避免数据丢失：成功换点立即重放当前页
         if (sw.ok && !triedSwitch) {
           triedSwitch = true;
@@ -440,11 +465,25 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries >= maxRetries) {
-        // 换点重置：网络失败（无 status）达上限后，尝试换 IP 重试一次（不限于第1页，避免数据丢失）
-        if (!triedSwitch && (errStatus === undefined || errStatus === null)) {
+        // 换点重置：网络失败（无 status）达上限后，尝试换 IP 重试
+        if (errStatus === undefined || errStatus === null) {
           let sw2 = makeSwitchResult();
-          try { sw2 = await trySwitchProxy(siteConfig, pageNo === 1 ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
-          if (sw2.ok) {
+          try { sw2 = await trySwitchProxy(siteConfig, isFirstPage ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
+          // 第一页探针：当前出口网络不通就一直换，直到成功或节点池轮尽（轮尽=后续页同样不通，取消本次抓取）
+          if (isFirstPage && (sw2.ok || sw2.exhausted)) {
+            if (sw2.exhausted) {
+              log(`第 1 页在所有节点上均网络失败，判定出口全部不可用，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, site: siteName }, site: siteName });
+              return { pageData: [], failed: true, gateAbort: true };
+            }
+            log(`第 1 页网络失败已换 IP（${sw2.from} → ${sw2.to}），继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName }, site: siteName });
+            retries = 0;
+            triedFallback = false;
+            method = String(siteConfig.method || 'GET').toUpperCase();
+            await new Promise(r => setTimeout(r, backoffDelay(0)));
+            continue;
+          }
+          // 非首页：换一次仍失败即跳过该页（不限于第1页，避免数据丢失）
+          if (sw2.ok && !triedSwitch) {
             triedSwitch = true;
             log(`第 ${pageNo} 页网络失败已换 IP，立即重试该页`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName }, site: siteName });
             retries = 0;
@@ -618,6 +657,14 @@ async function crawl(a, b, c, d) {
       }
     }
   } catch (_) {}
+  // 每轮爬取前先刷新 mihomo 订阅：远端 clash_fast.yaml 变动会改变节点池，
+  // 先刷新保证本轮换点（尤其第一页探针）拿到最新节点；refreshProviders 内部限频
+  try {
+    const _refreshUrl = resolveProxyUrl(siteConfig);
+    if (_refreshUrl && mihomo.isMihomoProxyUrl(_refreshUrl)) {
+      await mihomo.refreshProviders({ site, reason: 'crawl_start' });
+    }
+  } catch (_) {}
   const allData = {};
 
   const checkpoint = loadCheckpoint(site);
@@ -644,6 +691,8 @@ async function crawl(a, b, c, d) {
   // netFailSwitched：本轮连败是否已尝试过换 IP（保证熔断前至少真换一次，批次站单批即可越过换 IP 阈值）
   let netFailStreak = 0;
   let netFailSwitched = false;
+  // 第一页探针轮尽：所有代理节点均失败，判定出口不可用，取消本次抓取
+  let gateAborted = false;
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
   // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置
   let realTotalPagesObserved;
@@ -673,6 +722,13 @@ async function crawl(a, b, c, d) {
       if (failed) {
         failedCount++;
         totalFailed++;
+        // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
+        if (results[i].gateAbort) {
+          gateAborted = true;
+          log(`第一页在所有代理节点上均失败，判定出口全部不可用，取消本次抓取 [${site}]`, { level: 'error', event: 'first_page_gate_abort', context: { site, page: pageNo }, site });
+          shouldStopCrawling = true;
+          continue;
+        }
         // 405 连击：换点成功即清零（给新出口一个完整请求的观察窗，避免未验证先熔断），否则累计
         if (status === 405) {
           if (results[i].proxySwitched) {
@@ -758,8 +814,9 @@ async function crawl(a, b, c, d) {
     } else if (!hasNewDataInBatch && failedCount === 0) {
       log(`当前批次（第 ${currentPage - pagesToCrawl} 到第 ${currentPage - 1} 页）无新数据，停止爬取`, { event: 'early_stop', context: { failedCount, threshold: failureThreshold, site }, site });
       shouldStopCrawling = true;
-    } else if (!hasNewDataInBatch && failedCount > 0) {
+    } else if (!hasNewDataInBatch && failedCount > 0 && !gateAborted) {
       // 有失败页时不早停，避免掩盖数据；原阈值仅用于分级（batchSize=1 时单次失败曾误触发早停）
+      // gateAborted 已由第一页探针轮尽置位并取消抓取，无需再提示"继续爬取下一批"
       log(`当前批次无新数据，但失败 ${failedCount} 页（阈值 ${failureThreshold}），失败页可能掩盖新数据，继续爬取下一批`, { level: 'warn', event: 'continue_despite_failures', context: { failedCount, threshold: failureThreshold, site }, site });
     }
 
@@ -860,7 +917,8 @@ async function crawl(a, b, c, d) {
   const totalPersisted = totalNew - failedIds.size;
   const crawlLevel = fileWriteFailed > 0 ? 'warn' : 'info';
   const narrowedSuffix = realTotalPagesObserved !== undefined && effectiveTotalPages < totalPages ? `，站点总页数 ${realTotalPagesObserved}，按 ${effectiveTotalPages} 页停止` : '';
-  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${narrowedSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
+  const gateSuffix = gateAborted ? '，第一页探针轮尽已取消抓取' : '';
+  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${narrowedSuffix}${gateSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, gateAborted, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
 }
 
 function readRecentIds(site) {
@@ -885,4 +943,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
