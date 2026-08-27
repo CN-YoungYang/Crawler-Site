@@ -9,6 +9,7 @@ const path = require('path');
 const xlsx = require('xlsx');
 const { log, pruneOldLogs } = require('./log');
 const { normalizeSite } = require('./sites');
+const { hasValidXlsxHeader } = require('./utils');
 
 const RETENTION_DAYS = 30;
 // 索引页「最新公告」预览条数：仅内联最新一天前 N 条（{title,link,area}），其余日期保持轻量不内联
@@ -32,11 +33,20 @@ function indexHtmlPath(site) {
 function tokensCssPath(site) {
   return path.join(fileDir(site), 'tokens.css');
 }
+function commonCssPath(site) {
+  return path.join(fileDir(site), 'common.css');
+}
 function navHtmlPath() {
   return path.join('file', 'index.html');
 }
 function navTokensCssPath() {
   return path.join('file', 'tokens.css');
+}
+function navCommonCssPath() {
+  return path.join('file', 'common.css');
+}
+function navCssPath() {
+  return path.join('file', 'nav.css');
 }
 function defaultSite() {
   return normalizeSite(process.env.SITE || 'yfbzb');
@@ -102,19 +112,9 @@ function formatDateForFile(date) {
 
 // .xlsx 是 zip 包（魔数 PK\x03\x04）。先验魔数：xlsx 库对非 zip 内容会静默返回空表，
 function readRows(filePath) {
-  let fd;
-  try {
-    const head = Buffer.alloc(4);
-    fd = fs.openSync(filePath, 'r');
-    const bytesRead = fs.readSync(fd, head, 0, 4, 0);
-    if (bytesRead < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) {
-      throw new Error('不是有效的 xlsx（zip）文件');
-    }
-  } catch (error) {
-    log(`读取 ${filePath} 失败，已跳过：${error.message}`, { site: path.basename(path.dirname(filePath)) });
+  if (!hasValidXlsxHeader(filePath)) {
+    log(`读取 ${filePath} 失败，已跳过：不是有效的 xlsx（zip）文件`, { site: path.basename(path.dirname(filePath)) });
     return null;
-  } finally {
-    if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
   }
   try {
     const wb = xlsx.readFile(filePath);
@@ -266,555 +266,9 @@ const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
 }
 `;
 
-const COMMON_CSS = `
-  * { box-sizing: border-box; }
-  body::before { content: ""; display: block; height: 0.35rem; margin: 0 calc(var(--space-md) * -1) 3.25rem; background: var(--accent); }
-  html { overflow-x: hidden; }
-  body { overflow-x: clip; }
-  body {
-    margin: 0;
-    padding: 0 var(--space-md) 4rem;
-    background: var(--bg);
-    color: var(--fg);
-    font-family: var(--font-sans);
-    font-size: 0.875rem;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
+const COMMON_CSS = fs.readFileSync(path.join(__dirname, 'assets/common.css'), 'utf8');
 
-  .container {
-    width: 100%;
-    max-width: 72rem;
-    margin: 0 auto;
-  }
-
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: none; }
-
-  /* Focus States */
-  button:focus-visible, input:focus-visible, a:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-    border-radius: 2px;
-  }
-
-  /* Header */
-  .header { margin-bottom: var(--space-xl); }
-  .page-title {
-    margin: 0 0 var(--space-xs) 0;
-    font-size: clamp(2rem, 4vw, 3.5rem);
-    font-weight: 600;
-    letter-spacing: 0;
-    color: var(--fg);
-  }
-  .page-meta {
-    margin: 0;
-    color: var(--fg-muted);
-    font-size: 0.875rem;
-  }
-
-  /* Top Navigation (Detail page) */
-  .top-nav {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-xl);
-    padding-bottom: var(--space-md);
-    border-bottom: 1px solid var(--border);
-  }
-  .nav-link {
-    display: inline-flex;
-    align-items: center;
-    color: var(--fg-muted);
-    font-weight: 500;
-  }
-  .nav-link:hover { color: var(--fg); text-decoration: none; }
-
-  /* Stats Grid */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: 1.1fr 1.1fr 1fr 1.5fr;
-    gap: var(--space-md);
-    padding: var(--space-lg);
-    margin-bottom: var(--space-xl);
-    border: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-  }
-  .stat-item { display: flex; flex-direction: column; gap: 0.25rem; }
-  .stat-label { font-size: 0.75rem; color: var(--fg-muted); font-weight: 500; }
-  .stat-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 1.25rem; font-weight: 600; color: var(--fg); }
-
-  /* Filters */
-  .filter-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: var(--space-sm);
-  }
-  .section-title { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 1.45rem; font-weight: 700; }
-  .filter-status { color: var(--fg-muted); font-family: var(--font-mono); font-size: 0.75rem; }
-
-  .filter-controls {
-    display: flex;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-lg);
-  }
-  .search-input {
-    flex: 1;
-    max-width: 24rem;
-    padding: 0.5rem 0.75rem;
-    background: transparent;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    font-family: inherit;
-    font-size: 0.875rem;
-  }
-  .search-input::placeholder { color: var(--fg-muted); }
-  .search-input:focus {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
-    border-color: transparent;
-  }
-
-  .btn-secondary {
-    padding: 0.5rem 1rem;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .btn-secondary:hover { background: var(--bg-hover); }
-
-  /* Tables */
-  .table-container { width: 100%; overscroll-behavior-x: contain; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .table-container:has(.data-table) { overflow: auto; }
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-    text-align: left;
-    white-space: nowrap;
-  }
-  .data-table th {
-    padding: 0.7rem 1rem;
-    border-bottom: 1px solid var(--border-strong);
-    color: var(--fg-muted);
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    text-align: left;
-  }
-  .data-table td {
-    padding: 0.85rem 1rem;
-    border-bottom: 1px solid var(--border);
-    vertical-align: middle;
-  }
-  .data-table tr:last-child td { border-bottom: none; }
-
-  .date-grid {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 0.75rem;
-    width: 100%;
-  }
-  .date-item {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 0.5rem;
-    min-height: 5.5rem;
-    padding: 0.85rem 0.9rem;
-    border: 1px solid var(--border);
-    background: var(--bg-subtle);
-    color: var(--fg);
-    text-decoration: none;
-    transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
-  }
-  .date-item:hover {
-    border-color: var(--accent);
-    background: var(--bg-hover);
-    transform: translateY(-2px);
-  }
-  .date-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .date-item-date { min-width: 0; overflow: hidden; color: var(--accent-hover); font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
-  .date-item-meta {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.5rem;
-    color: var(--fg-muted);
-    font-size: 0.75rem;
-  }
-  .date-item-count { font-size: 0.75rem; }
-  .date-item-count strong { color: var(--fg); font-size: 0.95rem; font-weight: 600; }
-  .date-item-arrow { color: var(--fg-muted); font-size: 1rem; transition: transform 180ms ease, color 180ms ease; }
-  .date-item:hover .date-item-arrow { transform: translateX(0.2rem); color: var(--accent); }
-  .date-item:active { transform: translateY(0) scale(0.99); }
-  .detail-table { min-width: 42rem; }
-  .detail-table th:first-child,
-  .detail-table td:first-child { width: auto; min-width: 30rem; text-align: left; }
-  .detail-table th:last-child,
-  .detail-table td:last-child { width: 11rem; text-align: left; }
-  .detail-table .cell-wrap { white-space: normal; line-height: 1.55; }
-  .data-table tbody tr { transition: background 180ms ease; }
-  .data-table tbody tr:hover td { background-color: var(--bg-hover); }
-  .btn-secondary, .search-input { transition: background 180ms ease, border-color 180ms ease, transform 180ms ease; }
-  .btn-secondary:active { transform: translateY(1px) scale(0.98); }
-
-  /* Specific Column Styles */
-  .cell-mono { font-family: var(--font-mono); }
-  .cell-actions { display: flex; gap: var(--space-md); }
-  .cell-wrap { white-space: normal; min-width: 20rem; }
-
-  /* Sort Buttons */
-  .sort-button {
-    all: unset;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    cursor: pointer;
-    font-weight: inherit;
-    color: inherit;
-  }
-
-  /* Badges */
-  .badge {
-    display: inline-flex;
-    padding: 0.125rem 0.375rem;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 0.75rem;
-    color: var(--fg-muted);
-  }
-
-  /* Empty States */
-  .empty-state {
-    padding: var(--space-xl);
-    text-align: left;
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-  }
-  .empty-state strong { display: block; color: var(--fg); font-size: 1rem; margin-bottom: 0.25rem; }
-  .empty-state p { margin: 0; }
-
-  .stat-value-small { font-size: 0.95rem; }
-  .section-note { margin: 0.25rem 0 0; color: var(--fg-muted); font-size: 0.8125rem; }
-  /* 最新公告预览区：紧凑，不额外撑高 */
-  #latest-section { margin: calc(var(--space-xl) * -1) 0 var(--space-lg); }
-  #latest-section .table-container { max-height: 24rem; overflow-y: auto; }
-  .latest-more-link { display: inline-flex; align-items: center; white-space: nowrap; }
-  .retention-banner {
-    display: grid;
-    grid-template-columns: auto auto auto 1fr;
-    gap: 0.7rem;
-    align-items: center;
-    margin: 0 0 var(--space-xl);
-    padding: 0.85rem 1rem;
-    border-left: 3px solid var(--accent);
-    background: var(--bg-subtle);
-    color: var(--fg-muted);
-    font-size: 0.8125rem;
-  }
-  .retention-banner strong { color: var(--fg); font-size: 0.9rem; }
-  .retention-range { color: var(--accent-hover); font-size: 0.8rem; }
-  .retention-copy { justify-self: end; text-align: right; }
-
-  [hidden] { display: none !important; }
-  .row-hidden { display: none !important; }
-
-  @media (min-width: 981px) and (max-width: 1180px) {
-    .date-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  }
-
-  @media (min-width: 641px) and (max-width: 980px) {
-    .date-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  }
-
-  @media (max-width: 640px) {
-    .stats-grid { grid-template-columns: 1fr; gap: var(--space-lg); }
-    .retention-banner { grid-template-columns: 1fr; gap: 0.25rem; }
-    .retention-copy { justify-self: start; text-align: left; }
-    .filter-controls { flex-direction: column; }
-    .search-input { max-width: 100%; }
-    .date-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .date-item { min-height: 5rem; padding: 0.8rem; }
-    .latest-more-link { align-self: flex-start; }
-    .data-table th, .data-table td { padding-right: var(--space-sm); }
-    .index-table { width: 100%; }
-  }
-`;
-
-const NAV_CSS = `
-  /* Nav utility bar */
-  .nav-utility {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
-    padding: 0.7rem 0 0.95rem;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 2rem;
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--fg-muted);
-  }
-  .nav-utility-kicker {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 650;
-    color: var(--fg);
-    letter-spacing: 0.06em;
-  }
-  .nav-utility-kicker::before {
-    content: "";
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 0 4px var(--accent-soft);
-  }
-  .nav-utility-meta {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    white-space: nowrap;
-  }
-  .nav-utility-meta a {
-    color: var(--fg-muted);
-    text-decoration: none;
-    border-bottom: 1px solid transparent;
-    padding-bottom: 1px;
-  }
-  .nav-utility-meta a:hover { color: var(--fg); border-bottom-color: var(--border-strong); }
-
-  /* Hero: asymmetric split */
-  .nav-hero {
-    display: grid;
-    grid-template-columns: 1.35fr 0.9fr;
-    gap: 2rem;
-    align-items: end;
-    padding-bottom: 2rem;
-    margin-bottom: 2rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .nav-hero-title {
-    margin: 0 0 0.7rem;
-    font-size: clamp(2rem, 4.2vw, 3.25rem);
-    font-weight: 750;
-    line-height: 0.95;
-    letter-spacing: -0.03em;
-    color: var(--fg);
-  }
-  .nav-hero-desc {
-    margin: 0;
-    max-width: 34rem;
-    color: var(--fg-muted);
-    font-size: 0.94rem;
-    line-height: 1.65;
-  }
-  .nav-hero-stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    border: 1px solid var(--border);
-    background: var(--bg-subtle);
-    overflow: hidden;
-  }
-  .nav-hero-stat {
-    padding: 1rem 1.1rem;
-    border-right: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 0.22rem;
-  }
-  .nav-hero-stat:nth-child(2n) { border-right: none; }
-  .nav-hero-stat:nth-last-child(-n+2) { border-bottom: none; }
-  .nav-hero-stat-label {
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--fg-muted);
-    font-weight: 600;
-  }
-  .nav-hero-stat-value {
-    font-family: var(--font-mono);
-    font-size: 1.35rem;
-    font-weight: 700;
-    line-height: 1;
-    color: var(--fg);
-    letter-spacing: -0.02em;
-  }
-  .nav-hero-stat-value.small {
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: var(--fg-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .nav-hero-stat--accent { background: var(--accent-soft); }
-
-  /* Section head */
-  .nav-section-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 1rem;
-    margin-bottom: 0.9rem;
-  }
-  .nav-section-title { margin: 0; font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; color: var(--fg); }
-  .nav-section-note { font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg-muted); }
-
-  /* Site list: editorial rows */
-  .site-list {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--border);
-    background: var(--bg-subtle);
-    margin-bottom: 1.5rem;
-  }
-  .site-row {
-    display: grid;
-    grid-template-columns: 3.4rem 1fr auto;
-    gap: 1.2rem;
-    align-items: center;
-    padding: 1.3rem 1.2rem;
-    border-bottom: 1px solid var(--border);
-    text-decoration: none;
-    color: inherit;
-    transition: background 160ms ease;
-    cursor: pointer;
-  }
-  .site-row:last-child { border-bottom: none; }
-  .site-row:hover { background: var(--bg-hover); }
-  .site-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .site-row:focus-within { background: var(--bg-hover); }
-  .site-row-index {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 2.5rem;
-    height: 2.5rem;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    color: var(--fg-faint);
-  }
-  .site-row:hover .site-row-index { border-color: var(--accent); color: var(--accent); }
-  .site-row-main { min-width: 0; display: flex; flex-direction: column; gap: 0.42rem; }
-  .site-row-header { display: flex; align-items: baseline; gap: 0.65rem; flex-wrap: wrap; }
-  .site-row-title { margin: 0; font-size: 1.07rem; font-weight: 750; letter-spacing: -0.015em; color: var(--fg); line-height: 1.25; }
-  .site-row-key {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.14rem 0.42rem;
-    background: var(--bg-muted);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    font-family: var(--font-mono);
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--fg-muted);
-  }
-  .site-row-desc {
-    margin: 0;
-    color: var(--fg-muted);
-    font-size: 0.84rem;
-    line-height: 1.5;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .site-row-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem 1rem;
-    padding-top: 0.3rem;
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--fg-muted);
-  }
-  .site-row-stats strong { color: var(--fg); font-weight: 700; font-size: 0.81rem; }
-  .site-row-stats span { display: inline-flex; align-items: center; gap: 0.32rem; }
-  .site-row-stats .sep { width: 1px; height: 0.85em; background: var(--border); display: inline-block; }
-  .site-row-action { display: flex; align-items: center; justify-content: center; min-width: 2.5rem; }
-  .site-row-arrow {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-faint);
-    font-size: 0.85rem;
-    line-height: 1;
-    text-decoration: none;
-    transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
-  }
-  .site-row:hover .site-row-arrow { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-  .site-row-arrow:active { transform: scale(0.96); }
-  .site-row-origin {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.28rem;
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    letter-spacing: 0.03em;
-    color: var(--fg-faint);
-    text-decoration: none;
-    opacity: 0.9;
-    border-bottom: 1px dashed transparent;
-    padding-bottom: 1px;
-    transition: color 150ms ease, border-color 150ms ease, opacity 150ms ease;
-  }
-  .site-row-origin:hover { color: var(--fg-muted); border-bottom-color: var(--border-strong); opacity: 1; }
-  .site-row-origin:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
-  .site-row-origin-icon { font-size: 0.72em; opacity: 0.5; transform: translateY(-0.5px); }
-  .site-row-origin-wrap { display: flex; margin-top: 0.15rem; }
-  .site-row--empty .site-row-stats { color: var(--fg-faint); }
-  .site-row--empty .site-row-stats strong { color: var(--fg-muted); }
-
-  .nav-footer {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-    padding-top: 0.9rem;
-    border-top: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 0.71rem;
-    color: var(--fg-faint);
-  }
-  .nav-footer a { color: var(--fg-muted); text-decoration: none; }
-  .nav-footer a:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
-
-  @media (max-width: 860px) {
-    .nav-hero { grid-template-columns: 1fr; gap: 1.25rem; }
-    .site-row { grid-template-columns: 3rem 1fr 2.2rem; }
-  }
-  @media (max-width: 640px) {
-    .nav-utility { flex-direction: column; align-items: flex-start; gap: 0.3rem; }
-    .nav-hero-stats { border-left: none; border-right: none; }
-    .site-row { padding: 1rem; gap: 0.9rem; }
-    .site-row-desc { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-    .site-row-stats { gap: 0.35rem 0.7rem; }
-    .nav-footer { flex-direction: column; gap: 0.4rem; }
-  }
-`;
+const NAV_CSS = fs.readFileSync(path.join(__dirname, 'assets/nav.css'), 'utf8');
 
 function buildNavHtml(sitesData) {
   const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false });
@@ -864,7 +318,8 @@ function buildNavHtml(sitesData) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>招标数据导航</title>
 <link rel="stylesheet" href="tokens.css">
-<style>${COMMON_CSS}${NAV_CSS}</style>
+<link rel="stylesheet" href="common.css">
+<link rel="stylesheet" href="nav.css">
 </head>
 <body>
 <div class="container">
@@ -931,7 +386,7 @@ function buildIndexHtml(files) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>招标公告数据索引</title>
 <link rel="stylesheet" href="tokens.css">
-<style>${COMMON_CSS}</style>
+<link rel="stylesheet" href="common.css">
 </head>
 <body>
 <div class="container">
@@ -1135,7 +590,7 @@ function buildDetailHtml(file) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>${date} 招标公告明细</title>
 <link rel="stylesheet" href="tokens.css">
-<style>${COMMON_CSS}</style>
+<link rel="stylesheet" href="common.css">
 </head>
 <body>
 <div class="container">
@@ -1355,6 +810,7 @@ async function generateReport(site) {
   await Promise.all([
     fsp.writeFile(indexHtmlPath(siteName), buildIndexHtml(files), 'utf8'),
     fsp.writeFile(tokensCssPath(siteName), TOKENS_CSS, 'utf8'),
+    fsp.writeFile(commonCssPath(siteName), COMMON_CSS, 'utf8'),
     ...files.map(f => fsp.writeFile(path.join(dir, `${f.date}.html`), buildDetailHtml(f), 'utf8'))
   ]);
   log(`已生成报告 [${siteName}]：索引 ${indexHtmlPath(siteName)} + ${files.length} 个明细页（${files.reduce((n, f) => n + f.rows.length, 0)} 条记录）`, { event: 'report_generated', context: { site: siteName, files: files.length, records: files.reduce((n, f) => n + f.rows.length, 0) }, site: siteName });
@@ -1404,6 +860,7 @@ async function generateNav(sites) {
       try {
         await fsp.writeFile(idxPath, buildIndexHtml(s.files), 'utf8');
         await fsp.writeFile(tokensCssPath(s.site), TOKENS_CSS, 'utf8');
+        await fsp.writeFile(commonCssPath(s.site), COMMON_CSS, 'utf8');
       } catch (e) {
         const code = e.code || e.errno || 'UNKNOWN';
         log(`写入占位报告失败 [${s.site}]: ${e.message} code=${code}`, { level: 'warn', event: 'nav_write_placeholder_failed', context: { site: s.site, error: e.message, code } });
@@ -1422,6 +879,8 @@ async function generateNav(sites) {
   await Promise.all([
     fsp.writeFile(navHtmlPath(), html, 'utf8'),
     fsp.writeFile(navTokensCssPath(), TOKENS_CSS, 'utf8'),
+    fsp.writeFile(navCommonCssPath(), COMMON_CSS, 'utf8'),
+    fsp.writeFile(navCssPath(), NAV_CSS, 'utf8'),
   ]);
   log(`已生成导航页：${navHtmlPath()}（${valid.length} 个站点）`, { event: 'nav_generated', context: { sites: valid.join(','), count: valid.length } });
   return { sitesData, html };

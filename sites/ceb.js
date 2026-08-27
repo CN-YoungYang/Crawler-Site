@@ -2,15 +2,11 @@
 // 列表页: https://bulletin.cebpubservice.com/xxfbcmses/search/bulletin.html
 // 风控敏感：VAPTCHA 已在当前页面注释但仍有 JSESSIONID/acw_tc，禁止并发，必须串行+抖动
 
-// 上海时区日期（与 crawler.js#shanghaiDateStr 同款，TZ 无关）
-function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
-  return new Date(nowMs + 8 * 3600000 + offsetDays * 86400000).toISOString().slice(0, 10);
-}
+const { shanghaiDateStr } = require('../utils');
 
 function formatDate(d) {
-  // 兼容旧调用：若传入 Date，按上海时区格式化；否则按本地（保留但不再用于 buildUrl）
   if (d instanceof Date) {
-    return new Date(d.getTime() + 8 * 3600000).toISOString().slice(0, 10);
+    return shanghaiDateStr(0, d.getTime());
   }
   return String(d);
 }

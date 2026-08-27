@@ -80,7 +80,9 @@ async function main() {
     assert.ok(detailHtml.includes('search-status'), '标题搜索应反馈匹配数量');
     assert.ok(detailHtml.includes('filtered-empty'), '零条搜索结果应有专用空状态');
     assert.ok(detailHtml.includes("rel = 'noopener noreferrer'"), '外链应隔离新窗口上下文');
-    assert.ok(detailHtml.includes('@media (max-width: 640px)'), '明细页应采用移动布局');
+    assert.ok(detailHtml.includes('href="common.css"'), '明细页应外链 common.css');
+    const commonCss = fs.readFileSync(path.join(fileDir, 'common.css'), 'utf8');
+    assert.ok(commonCss.includes('@media (max-width: 640px)'), 'common.css 应含移动布局');
     assert.ok(!detailHtml.includes("label: '类型'"), '明细页表头不应含类型列');
     assert.ok(!detailHtml.includes("label: '发布时间'"), '明细页表头不应含发布时间列');
     assert.ok(!detailHtml.includes("'noticeType'"), '明细页渲染逻辑不应引用 noticeType');

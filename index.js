@@ -1,8 +1,8 @@
-const { crawl, isStopping } = require('./crawler');
+const { crawl, isStopping, sleepInterruptible } = require('./crawler');
 const { generateReport, generateNav } = require('./report');
 const { log } = require('./log');
 const { startServer } = require('./server');
-const { getSiteConfig, normalizeSite, normalizeSites, parseSitesList } = require('./sites');
+const { getSiteConfig, normalizeSite, parseSitesList } = require('./sites');
 
 function parseArguments() {
   const args = process.argv.slice(2);
@@ -25,18 +25,18 @@ function parsePerSiteOverrides(sites, globalDefaults) {
   const perSite = {};
   for (const site of sites) {
     const upper = site.toUpperCase();
-    const tpSite = parseInt(process.env[`TOTAL_PAGES_${upper}`] || process.env[`PAGES_${upper}`] || '', 10);
-    const ivSite = parseInt(process.env[`INTERVAL_MS_${upper}`] || process.env[`INTERVAL_${upper}`] || '', 10);
-    const mindSite = parseInt(process.env[`MIN_DELAY_S_${upper}`] || process.env[`MIN_DELAY_${upper}`] || '', 10);
-    const maxdSite = parseInt(process.env[`MAX_DELAY_S_${upper}`] || process.env[`MAX_DELAY_${upper}`] || '', 10);
-    const cronSite = (process.env[`CRON_${upper}`] || process.env[`CRON_EXPR_${upper}`] || '').trim();
-    const jsonSite = sitesConfigJson ? (sitesConfigJson[site] || sitesConfigJson[upper] || sitesConfigJson[site.toLowerCase()] || {}) : {};
+    const tpSite = parseInt(process.env[`TOTAL_PAGES_${upper}`] || '', 10);
+    const ivSite = parseInt(process.env[`INTERVAL_MS_${upper}`] || '', 10);
+    const mindSite = parseInt(process.env[`MIN_DELAY_S_${upper}`] || '', 10);
+    const maxdSite = parseInt(process.env[`MAX_DELAY_S_${upper}`] || '', 10);
+    const cronSite = (process.env[`CRON_${upper}`] || '').trim();
+    const jsonSite = sitesConfigJson ? (sitesConfigJson[site] || sitesConfigJson[site.toLowerCase()] || {}) : {};
     perSite[site] = {
-      totalPages: Number.isFinite(tpSite) ? tpSite : (jsonSite.totalPages ?? jsonSite.TOTAL_PAGES ?? jsonSite.pages ?? globalDefaults.totalPages),
-      interval: Number.isFinite(ivSite) ? ivSite : (jsonSite.interval ?? jsonSite.INTERVAL_MS ?? jsonSite.INTERVAL ?? globalDefaults.interval),
-      minDelay: Number.isFinite(mindSite) ? mindSite : (jsonSite.minDelay ?? jsonSite.MIN_DELAY_S ?? jsonSite.MIN_DELAY ?? globalDefaults.minDelay),
-      maxDelay: Number.isFinite(maxdSite) ? maxdSite : (jsonSite.maxDelay ?? jsonSite.MAX_DELAY_S ?? jsonSite.MAX_DELAY ?? globalDefaults.maxDelay),
-      cronExpr: cronSite || jsonSite.cron || jsonSite.CRON_EXPR || jsonSite.cronExpr || globalDefaults.cronExpr
+      totalPages: Number.isFinite(tpSite) ? tpSite : (jsonSite.totalPages ?? globalDefaults.totalPages),
+      interval: Number.isFinite(ivSite) ? ivSite : (jsonSite.interval ?? globalDefaults.interval),
+      minDelay: Number.isFinite(mindSite) ? mindSite : (jsonSite.minDelay ?? globalDefaults.minDelay),
+      maxDelay: Number.isFinite(maxdSite) ? maxdSite : (jsonSite.maxDelay ?? globalDefaults.maxDelay),
+      cronExpr: cronSite || jsonSite.cron || globalDefaults.cronExpr
     };
   }
   return perSite;
@@ -45,11 +45,11 @@ function parsePerSiteOverrides(sites, globalDefaults) {
 function parseEnv() {
   const argv = parseArguments();
   const sites = parseSitesList();
-  const tp = parseInt(process.env.TOTAL_PAGES || process.env.PAGES || '', 10);
-  const iv = parseInt(process.env.INTERVAL_MS || process.env.INTERVAL || '', 10);
-  const mind = parseInt(process.env.MIN_DELAY_S || process.env.MIN_DELAY || '', 10);
-  const maxd = parseInt(process.env.MAX_DELAY_S || process.env.MAX_DELAY || '', 10);
-  const cronExpr = (process.env.CRON_EXPR || process.env.CRON || '').trim();
+  const tp = parseInt(process.env.TOTAL_PAGES || '', 10);
+  const iv = parseInt(process.env.INTERVAL_MS || '', 10);
+  const mind = parseInt(process.env.MIN_DELAY_S || '', 10);
+  const maxd = parseInt(process.env.MAX_DELAY_S || '', 10);
+  const cronExpr = (process.env.CRON_EXPR || '').trim();
   const globalDefaults = {
     totalPages: Number.isFinite(tp) ? tp : argv.totalPages,
     interval: Number.isFinite(iv) ? iv : argv.interval,
@@ -145,21 +145,19 @@ function getRandomDelay(minSeconds, maxSeconds) {
   return Math.floor(Math.random() * (maxSeconds - minSeconds + 1) + minSeconds) * 1000;
 }
 
-// 标准 5 段 cron：分 时 日 月 周，支持 *, 逗号, 区间, 步长（如 "10,40 * * * *" 每小时10/40分，"0 2 * * *" 每天02:00，"*/15 * * * *" 每15分钟）
-// 时区固定为 Asia/Shanghai（与 TZ 环境一致）
+// 仅支持 m h * * *（文档约定），时区 Asia/Shanghai。支持 m/h 的 *、逗号、区间、步长，如 "10,40 * * * *"、"0 2 * * *"
 function nextCronDelay(cronExpr) {
-  // 兼容 "10, 40 * * * *" 这类逗号后带空格的写法
   const normalizedExpr = cronExpr.trim().replace(/\s*,\s*/g, ',');
   const parts = normalizedExpr.split(/\s+/);
   if (parts.length !== 5) throw new Error(`cron 需 5 段， got ${parts.length}`);
   const [minStr, hourStr, domStr, monStr, dowStr] = parts;
+  if (domStr !== '*' || monStr !== '*' || dowStr !== '*') throw new Error('仅支持 m h * * *，日/月/周需为 *');
 
   function parseField(field, min, max, name) {
     const values = new Set();
-    const isStar = field === '*';
-    if (isStar) {
+    if (field === '*') {
       for (let i = min; i <= max; i++) values.add(i);
-      return { values, isStar: true };
+      return values;
     }
     const segments = field.split(',').map(s => s.trim());
     for (let seg of segments) {
@@ -194,45 +192,24 @@ function nextCronDelay(cronExpr) {
       for (let v = start; v <= end; v += step) values.add(v);
     }
     if (values.size === 0) throw new Error(`${name} 字段无有效值 "${field}"`);
-    return { values, isStar: false };
+    return values;
   }
 
-  const minF = parseField(minStr, 0, 59, '分钟');
-  const hourF = parseField(hourStr, 0, 23, '小时');
-  const domF = parseField(domStr, 1, 31, '日');
-  const monF = parseField(monStr, 1, 12, '月');
-  const dowF = parseField(dowStr, 0, 7, '周');
-  // 周日的 7 别名归一到 0
-  if (dowF.values.has(7)) { dowF.values.delete(7); dowF.values.add(0); }
+  const minSet = parseField(minStr, 0, 59, '分钟');
+  const hourSet = parseField(hourStr, 0, 23, '小时');
 
   const nowMs = Date.now();
   const shanghaiNowMs = nowMs + 8 * 3600000;
-  // 对齐到分钟起点：若刚好在整分则立即匹配（与旧 daily 逻辑一致，delay=0），否则取下一分钟
   let candidateMs = shanghaiNowMs - (shanghaiNowMs % 60000);
   if (candidateMs < shanghaiNowMs) candidateMs += 60000;
-  // 上限 4 年逐分钟扫描，覆盖闰年 2-29（"0 0 29 2 *" 距今约 1461 天）；非法日期如 2-30 仍会在穷尽后抛错
-  const limit = candidateMs + 1461 * 24 * 60 * 60000;
+  const limit = candidateMs + 2 * 24 * 60 * 60000;
   for (let t = candidateMs; t < limit; t += 60000) {
     const d = new Date(t);
-    const minute = d.getUTCMinutes();
-    const hour = d.getUTCHours();
-    const dom = d.getUTCDate();
-    const mon = d.getUTCMonth() + 1;
-    const dow = d.getUTCDay();
-    if (!minF.values.has(minute)) continue;
-    if (!hourF.values.has(hour)) continue;
-    if (!monF.values.has(mon)) continue;
-    const domMatch = domF.values.has(dom);
-    const dowMatch = dowF.values.has(dow);
-    let dayMatch;
-    if (domF.isStar && dowF.isStar) dayMatch = true;
-    else if (domF.isStar) dayMatch = dowMatch;
-    else if (dowF.isStar) dayMatch = domMatch;
-    else dayMatch = domMatch || dowMatch;
-    if (!dayMatch) continue;
+    if (!minSet.has(d.getUTCMinutes())) continue;
+    if (!hourSet.has(d.getUTCHours())) continue;
     return t - shanghaiNowMs;
   }
-  throw new Error(`cron "${cronExpr}" 在 1461 天内无匹配时间`);
+  throw new Error(`cron "${cronExpr}" 在 48 小时内无匹配时间`);
 }
 
 async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDelay, cronExpr }) {
@@ -348,18 +325,7 @@ async function scheduleLoop(input) {
   process.exit(0);
 }
 
-async function sleepInterruptible(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    if (!Number.isFinite(ms)) log(`sleepInterruptible 非法 ms=${String(ms)}，已跳过`, { level: 'warn', event: 'sleep_invalid', context: { ms: String(ms) } });
-    return !isStopping();
-  }
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (isStopping()) return false;
-    await new Promise(r => setTimeout(r, Math.min(1000, end - Date.now())));
-  }
-  return !isStopping();
-}
+// sleepInterruptible 已收敛至 crawler.js（单例，避免双份轮询实现）
 
 if (require.main === module) {
   const env = parseEnv();

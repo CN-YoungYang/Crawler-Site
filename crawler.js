@@ -6,7 +6,47 @@ const path = require('path');
 const { log } = require('./log');
 const { getSiteConfig, normalizeSite } = require('./sites');
 const mihomo = require('./sites/_mihomo');
-const { defaultBuildUrl, defaultIsBoundary, defaultParse, defaultExtractId } = require('./sites/_base');
+const { shanghaiDateStr, hasValidXlsxHeader } = require('./utils');
+
+// 默认站点策略（原 sites/_base.js，已内联避免单实现抽象层）
+function defaultExtractId(link) {
+  if (!link) return '';
+  return String(link).split('/').pop().split('.')[0];
+}
+function defaultIsBoundary(error) {
+  return error && error.response && error.response.status === 403;
+}
+function defaultBuildUrl(pageNo, siteConfig) {
+  const base = siteConfig.baseUrl || '';
+  const suffix = siteConfig.urlSuffix || '';
+  return `${base}${pageNo}${suffix}`;
+}
+function defaultParse($, html, existingIds, siteConfig) {
+  const selectors = siteConfig.selectors || {};
+  const linkPrefix = siteConfig.linkPrefix || '';
+  const extractId = siteConfig.extractId || defaultExtractId;
+  const rows = $(selectors.rows);
+  const pageData = [];
+  rows.each((index, element) => {
+    const $el = $(element);
+    const title = $el.find(selectors.titleLink).text().trim();
+    const link = $el.find(selectors.titleLink).attr('href');
+    if (!link) return;
+    const id = extractId(link, $el);
+    if (!id) return;
+    if (existingIds && existingIds.has(id)) return;
+    const fullLink = link.startsWith('http://') || link.startsWith('https://') ? link : `${linkPrefix}${link}`;
+    pageData.push({
+      id,
+      title,
+      link: fullLink,
+      noticeType: $el.find(selectors.noticeType).text().trim(),
+      area: $el.find(selectors.area).text().trim(),
+      publishTime: $el.find(selectors.publishTime).text().trim()
+    });
+  });
+  return pageData;
+}
 
 // 失败容忍上限：一批中失败页数 > 此值 则不触发"无新数据"早停（避免失败页伪装无新数据导致误停）
 const FAILURE_STOP_THRESHOLD = 2;
@@ -173,25 +213,9 @@ async function trySwitchProxy(siteConfig, reason) {
   });
 }
 
-// 上海时区日期（UTC+8，无夏令时），用同一 nowMs 避免跨午夜竞态
-function shanghaiDateStr(offsetDays = 0, nowMs = Date.now()) {
-  return new Date(nowMs + 8 * 3600000 + offsetDays * 86400000).toISOString().slice(0, 10);
-}
+// shanghaiDateStr 已收敛至 utils.js（Intl 标准库）
 
-// xlsx 魔数校验（zip PK\x03\x04），抽公用避免三处重复
-function hasValidXlsxHeader(filePath) {
-  let fd;
-  try {
-    const head = Buffer.alloc(4);
-    fd = fs.openSync(filePath, 'r');
-    const bytesRead = fs.readSync(fd, head, 0, 4, 0);
-    return bytesRead >= 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
-  } catch (_) {
-    return false;
-  } finally {
-    if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
-  }
-}
+// hasValidXlsxHeader 已收敛至 utils.js
 
 function readXlsxRowsSafe(filePath, site, event = 'recent_read_failed') {
   if (!hasValidXlsxHeader(filePath)) {
@@ -469,8 +493,7 @@ function isStopping() {
   return stopping;
 }
 
-// 本地可中断休眠（与 index.js#sleepInterruptible 同逻辑，避免 index↔crawler 循环依赖）
-async function sleepInterruptibleLocal(ms) {
+async function sleepInterruptible(ms) {
   if (!Number.isFinite(ms) || ms <= 0) {
     if (!Number.isFinite(ms)) log(`sleepInterruptible 非法 ms=${String(ms)}，已跳过`, { level: 'warn', event: 'sleep_invalid', context: { ms: String(ms) } });
     return !stopping;
@@ -749,7 +772,7 @@ async function crawl(a, b, c, d) {
     }
 
     if (!shouldStopCrawling) {
-      const ok = await sleepInterruptibleLocal(interval);
+      const ok = await sleepInterruptible(interval);
       if (!ok || stopping) shouldStopCrawling = true;
     }
   }
@@ -862,4 +885,4 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };

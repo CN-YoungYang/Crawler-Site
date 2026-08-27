@@ -3,24 +3,14 @@ const ceb = require('./ceb');
 
 const registry = { yfbzb, ceb };
 
-function normalizeSite(site) {
-  return String(site || process.env.SITE || 'yfbzb').trim().toLowerCase();
-}
+const normalizeSite = site => String(site || process.env.SITE || 'yfbzb').trim().toLowerCase();
 
 function normalizeSites(input) {
-  if (Array.isArray(input)) {
-    return [...new Set(input.map(s => String(s).trim().toLowerCase()).filter(Boolean))];
-  }
-  if (typeof input === 'string') {
-    return [...new Set(input.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))];
-  }
-  return [];
+  const arr = Array.isArray(input) ? input : typeof input === 'string' ? input.split(',') : [];
+  return [...new Set(arr.map(s => String(s).trim().toLowerCase()).filter(Boolean))];
 }
 
-function parseSitesList(raw) {
-  const src = raw !== undefined ? raw : (process.env.SITES || process.env.SITES_LIST || process.env.SITE || process.env.CRAWLER_SITE || 'yfbzb');
-  return normalizeSites(src);
-}
+const parseSitesList = raw => normalizeSites(raw !== undefined ? raw : (process.env.SITES || process.env.SITES_LIST || process.env.SITE || process.env.CRAWLER_SITE || 'yfbzb'));
 
 function getSiteConfig(site) {
   const key = normalizeSite(site);
@@ -34,4 +24,4 @@ function listEnabledSites() {
   return Object.keys(registry);
 }
 
-module.exports = { getSiteConfig, listEnabledSites, registry, normalizeSite, parseSitesList };
+module.exports = { getSiteConfig, listEnabledSites, registry, normalizeSite, normalizeSites, parseSitesList };

@@ -77,56 +77,8 @@ function buildHealthPayload() {
       navGeneratedAt = fs.statSync(navPath).mtime.toISOString();
     }
   } catch (_) {}
-  let sites = [];
-  let totals = { sites: 0, dates: 0, records: 0 };
-  try {
-    // 懒加载，避免循环依赖与启动开销
-    const report = require('./report');
-    const sitesMod = require('./sites');
-    let targets;
-    try {
-      const envSites = sitesMod.parseSitesList();
-      targets = envSites.length ? envSites : sitesMod.listEnabledSites();
-    } catch (_) {
-      targets = sitesMod.listEnabledSites();
-    }
-    const valid = [];
-    for (const s of targets) {
-      try { sitesMod.getSiteConfig(s); valid.push(s); } catch (_) {}
-    }
-    sites = valid.map(site => {
-      try {
-        const st = report.collectSiteStats(site, { createDir: false });
-        return {
-          site: st.site,
-          displayName: st.meta.displayName,
-          description: st.meta.description,
-          totalDates: st.totalDates,
-          totalRecords: st.totalRecords,
-          latestUpdate: st.latestUpdate,
-          hasReport: fs.existsSync(path.join(resolveFileRoot(), st.site, 'index.html')),
-        };
-      } catch (_) {
-        return { site, displayName: site, totalDates: 0, totalRecords: 0, latestUpdate: '-', hasReport: false };
-      }
-    });
-    totals = {
-      sites: sites.length,
-      dates: sites.reduce((n, s) => n + s.totalDates, 0),
-      records: sites.reduce((n, s) => n + s.totalRecords, 0),
-    };
-  } catch (_) {
-    // 降级：仅返回基础存活信息
-  }
-  return {
-    status: 'ok',
-    timestamp: now,
-    uptime,
-    navExists,
-    navGeneratedAt,
-    totals,
-    sites,
-  };
+  // 精简探针：仅存活 + 导航时间，totals/sites 为兼容保留空值（原实现每次 scanFiles 读 xlsx，探针秒级开销）
+  return { status: 'ok', timestamp: now, uptime, navExists, navGeneratedAt, totals: { sites: 0, dates: 0, records: 0 }, sites: [] };
 }
 
 function createServer({ port = 8080, root } = {}) {
