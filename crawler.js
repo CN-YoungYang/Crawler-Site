@@ -314,7 +314,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   // 方法容错：仅显式开启 fallbackOn405 的站点才降级（如 ceb），避免 yfbzb 等 GET 站点误发 POST
   let method = String(siteConfig.method || 'GET').toUpperCase();
   let triedFallback = false;
-  let triedFirstPageSwitch = false;
+  let triedSwitch = false;
 
   // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
   async function maybeThrottle() {
@@ -425,10 +425,10 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         // 单页即换 IP：mihomo 场景轮换取下一个未试叶子节点，避免攒够 consecutive405 才熔断
         let sw = makeSwitchResult();
         try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
-        // 第一页优先换 IP：第一页需获取总页码，换点成功后立即重试该页（不消耗额外批次）
-        if (pageNo === 1 && sw.ok && !triedFirstPageSwitch) {
-          triedFirstPageSwitch = true;
-          log(`第 1 页双 405 已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName }, site: siteName });
+        // 换点后重置重试该页（不限于第1页），避免数据丢失：成功换点立即重放当前页
+        if (sw.ok && !triedSwitch) {
+          triedSwitch = true;
+          log(`第 ${pageNo} 页双 405 已换 IP，立即重试该页`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName }, site: siteName });
           await new Promise(r => setTimeout(r, backoffDelay(0)));
           continue;
         }
@@ -440,13 +440,13 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
       log(`第 ${pageNo} 页加载失败 [code=${error.code} status=${errStatus} method=${method}${extra405}]：${error.message}，正在进行第 ${retries} 次重试，${backoff}ms 后...`, { level: 'warn', event: 'retry', context: { page: pageNo, attempt: retries, backoffMs: backoff, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
       if (retries >= maxRetries) {
-        // 第一页优先换 IP：网络失败达上限后，第一页尝试换 IP 重试一次
-        if (pageNo === 1 && !triedFirstPageSwitch && (errStatus === undefined || errStatus === null)) {
+        // 换点重置：网络失败（无 status）达上限后，尝试换 IP 重试一次（不限于第1页，避免数据丢失）
+        if (!triedSwitch && (errStatus === undefined || errStatus === null)) {
           let sw2 = makeSwitchResult();
-          try { sw2 = await trySwitchProxy(siteConfig, 'first_page_net_fail'); } catch (_) {}
+          try { sw2 = await trySwitchProxy(siteConfig, pageNo === 1 ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
           if (sw2.ok) {
-            triedFirstPageSwitch = true;
-            log(`第 1 页网络失败已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName }, site: siteName });
+            triedSwitch = true;
+            log(`第 ${pageNo} 页网络失败已换 IP，立即重试该页`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName }, site: siteName });
             retries = 0;
             triedFallback = false;
             method = String(siteConfig.method || 'GET').toUpperCase();
@@ -461,12 +461,12 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     }
   }
   // 终局兜底：重试额度耗尽仍未返回（防御性），确保 crawlPage 永不隐式返回 undefined
-  // 第一页最终兜底的换 IP 重试
-  if (pageNo === 1 && !triedFirstPageSwitch) {
+  // 换点兜底：不限于第1页，换 IP 成功则递归重试一次（防数据丢失）
+  if (!triedSwitch) {
     let sw3 = makeSwitchResult();
-    try { sw3 = await trySwitchProxy(siteConfig, 'first_page_exhausted'); } catch (_) {}
+    try { sw3 = await trySwitchProxy(siteConfig, pageNo === 1 ? 'first_page_exhausted' : 'exhausted'); } catch (_) {}
     if (sw3.ok) {
-      log(`第 1 页重试额度耗尽后已换 IP，立即重试该页`, { level: 'warn', event: 'first_page_retry', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName }, site: siteName });
+      log(`第 ${pageNo} 页重试额度耗尽后已换 IP，立即重试该页`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName }, site: siteName });
       return crawlPage(pageNo, siteConfig, existingIds, maxRetries);
     }
   }
