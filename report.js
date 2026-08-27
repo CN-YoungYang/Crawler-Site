@@ -266,9 +266,13 @@ const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
 }
 `;
 
-const COMMON_CSS = fs.readFileSync(path.join(__dirname, 'assets/common.css'), 'utf8');
+function normalizeEol(text) {
+  return text.replace(/\r\n/g, '\n');
+}
 
-const NAV_CSS = fs.readFileSync(path.join(__dirname, 'assets/nav.css'), 'utf8');
+const COMMON_CSS = normalizeEol(fs.readFileSync(path.join(__dirname, 'assets/common.css'), 'utf8'));
+
+const NAV_CSS = normalizeEol(fs.readFileSync(path.join(__dirname, 'assets/nav.css'), 'utf8'));
 
 function buildNavHtml(sitesData) {
   const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false });
