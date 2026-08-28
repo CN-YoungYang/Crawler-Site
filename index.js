@@ -336,7 +336,7 @@ if (require.main === module) {
   generateNav(env.sites).catch(e => {
     log(`预生成导航页失败: ${e.message}`, { level: 'warn', event: 'nav_pre_failed', context: { error: e.message } });
   });
-  // 启动先拉取订阅更新：mihomo 节点池随远端 clash_fast.yaml 变动，先刷新保证首轮换点（第一页探针）拿到最新节点。
+  // 启动先拉取订阅更新：easy_proxies 节点池随远端订阅变动，先刷新保证首轮换点（第一页探针）拿到最新节点。
   // 不阻塞调度（fire-and-forget）；crawl() 每轮开始也会刷新兜底，失败由 refreshProviders 内部告警
   Promise.all(env.sites.map(s => refreshProxyProviders(s))).then(results => {
     const refreshed = results.filter(Boolean).length;

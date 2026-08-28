@@ -4,11 +4,13 @@
 > 决策：用户选择「B 回退旧源 bulletin.cebpubservice.com（代理换 IP）」。
 > ctbpsp.com 成果已归档至 `jsreverse-yidun/`（gitignore，不入仓库），将来服务端放松可立即切回。
 
+> **当前实现补充（2026-08-28）**：旧源仍是 `ceb` 的生产数据源；代理控制面已统一为 easy_proxies multi-port。Compose 默认使用 `http://easy_proxies:24000`，管理 API 为 `9091`，适配器与配置见 `sites/_easy_proxies.js`、`easy_proxies/config.yaml.example` 和 `README.md`。
+
 ---
 
 ## 1. 任务背景与目标
 
-**起因**：ceb 站点原抓 `bulletin.cebpubservice.com`（HTML+cheerio），依赖 mihomo 代理换 IP 绕 WAF。近期对代理链路连续 5 页 `ECONNRESET / timeout 30000ms` 全败，无数据空转。
+**起因**：ceb 站点原抓 `bulletin.cebpubservice.com`（HTML+cheerio），依赖 easy_proxies 代理换 IP 绕 WAF。近期对代理链路连续 5 页 `ECONNRESET / timeout 30000ms` 全败，无数据空转。
 
 **目标**：ceb 改抓 `https://ctbpsp.com/#/bulletinList` 背后的 JSON API（已放弃，见最终状态）。
 
@@ -40,8 +42,8 @@ ctbpsp.com 的 `necaptcha-validate` 票据（网易易盾）**纯协议无法自
 ## 4. 回退执行记录（2026-08-25）
 
 - [x] 归档 ctbpsp 实现 → `jsreverse-yidun/ctbpsp-implementation/`
-- [x] `git checkout HEAD -- sites/ceb.js crawler.js .gitignore`（三文件回退）
-- [x] `npm test` 全过（6/6 套件，旧源回归无损）
+- [x] 从备份/HEAD 恢复 `sites/ceb.js`、`crawler.js`、`.gitignore` 的旧源路径（三文件回退）
+- [x] 当时旧源回归通过；当前包含 easy_proxies 适配器的完整 `npm test` 为 8/8 套件通过
 - [x] 清理临时产物（solve_*.js / fetch_*.js / acw.html / ctbpsp_app.js 等 20 个文件）
 - [x] 保留 `docs/progress-ceb-ctbpsp.md`（本文件，记录最终结论）
 

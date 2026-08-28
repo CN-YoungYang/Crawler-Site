@@ -157,8 +157,9 @@ module.exports = {
   // 405 容错：GET 被 WAF 拒时自动降级为 POST
   method: 'GET',
   fallbackOn405: true,
-  // 代理换 IP 绕过 WAF（甲骨文固定 IP 被拦时设 HTTP_PROXY / CEB_PROXY_URL 走 mihomo sidecar；双 405 触发叶子节点轮换取新出口）
-  // 例：HTTP_PROXY=http://127.0.0.1:7890 或 CEB_PROXY_URL=http://127.0.0.1:7890（mihomo 加载 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml）
+  // 代理换 IP 绕过 WAF：easy_proxies multi-port 管理 API 在双 405 后选择下一个独立节点端口。
+  // 例：CEB_PROXY_URL=http://easy_proxies:24000，EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
+  proxyProvider: 'easy_proxies',
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     // 精简指纹：移除 Sec-Fetch-* / Upgrade-Insecure-Requests，避免与 WAF 校验不一致触发 405

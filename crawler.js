@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { log } = require('./log');
 const { getSiteConfig, normalizeSite } = require('./sites');
-const mihomo = require('./sites/_mihomo');
+const easyProxies = require('./sites/_easy_proxies');
 const { shanghaiDateStr, hasValidXlsxHeader } = require('./utils');
 
 // 默认站点策略（原 sites/_base.js，已内联避免单实现抽象层）
@@ -66,7 +66,7 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 // ---- 代理（ceb 换 IP 绕过 WAF，轻量替代浏览器引擎） ----
 // 优先级：PROXY_<SITE> / <SITE>_PROXY_URL > PROXY_URL > HTTPS_PROXY/HTTP_PROXY > siteConfig.proxyUrl
-// 值形如 http://127.0.0.1:7890 或 http://user:pass@host:port；NO_PROXY 直连白名单
+// 值形如 http://easy_proxies:24000 或 http://user:pass@host:port；NO_PROXY 直连白名单
 function desensitizeProxyUrl(url) {
   if (!url) return '';
   try {
@@ -100,6 +100,9 @@ function isNoProxy(targetUrl, siteConfig) {
 
 function resolveProxyUrl(siteConfig) {
   if (siteConfig && siteConfig.proxy === false) return '';
+  if (siteConfig && typeof siteConfig.runtimeProxyUrl === 'string' && siteConfig.runtimeProxyUrl.trim()) {
+    return siteConfig.runtimeProxyUrl.trim();
+  }
   const site = String((siteConfig && siteConfig.name) || '').toUpperCase();
   const candidates = [];
   if (site) {
@@ -116,6 +119,13 @@ function resolveProxyUrl(siteConfig) {
   if (siteConfig && typeof siteConfig.proxy === 'string' && siteConfig.proxy) candidates.push(siteConfig.proxy);
   const raw = candidates.find(v => typeof v === 'string' && v.trim());
   return raw ? raw.trim() : '';
+}
+
+function getProxyProvider(siteConfig, proxyUrl) {
+  const configured = String((siteConfig && siteConfig.proxyProvider) || '').trim().toLowerCase();
+  if (easyProxies.isEasyProxiesProxyUrl(proxyUrl)) return easyProxies;
+  if (configured === 'easy_proxies' || configured === 'easy-proxies') return easyProxies;
+  return null;
 }
 
 function getProxyAgents(siteConfig, targetUrl) {
@@ -150,15 +160,14 @@ function getProxyAgents(siteConfig, targetUrl) {
   }
 }
 
-// 双 405/网络连败的秒级换 IP：通过代理控制面切节点（默认 mihomo external-controller，
-// 可经 siteConfig.switchProxy 按站覆盖 provider，mihomo 知识收敛于 sites/_mihomo.js）。
-// 轮换语义（2026-08-25 生产教训：池仅 {auto, 香港} 时「第一个非当前候选」来回打转，
-// 且切到 auto 这类组等于把出口选择权交还 URLTest，可能立刻回到被封节点）：
-// - 只切真实叶子节点：排除 DIRECT/REJECT 及一切组类型（结构判定，见 _mihomo#isLeafNode）；
-// - 同一轮（两次成功页之间）不重复已试节点，按组内顺序依次轮换；
+// 双 405/网络连败的秒级换 IP：通过 easy_proxies 控制面切换 multi-port 节点，
+// 也可经 siteConfig.switchProxy 按站覆盖；easy_proxies 知识收敛于 sites/_easy_proxies.js。
+// 轮换语义：池中节点按管理 API 返回顺序轮换，避免当前端口和已试节点反复打转：
+// - 只切真实节点端口：由 provider 过滤不可用节点并保留每轮已试记录；
+// - 同一轮（两次成功页之间）不重复已试节点，按列表顺序依次轮换；
 // - 轮尽不再切换并返回 exhausted（事件 proxy_pool_exhausted），由调用方累计失败自然熔断。
 // 返回 {ok, from, to, exhausted}；ok=true 表示本次真的切换了节点。
-const _proxyRotate = new Map(); // 轮换键 -> 本轮已试叶子节点名数组
+const _proxyRotate = new Map(); // 轮换键 -> 本轮已试节点名数组
 const rotateKey = site => String(site || '').trim().toLowerCase();
 
 function makeSwitchResult(overrides) {
@@ -183,9 +192,11 @@ async function trySwitchProxy(siteConfig, reason) {
   // 删侧用 normalizeSite 后的参数 site，两链不一致会永久残留致静默 exhausted——审查 #2）
   const key = rotateKey(normalizeSite((siteConfig && siteConfig.name) || ''));
   return withProxySwitchLock(key, async () => {
+    const provider = getProxyProvider(siteConfig, proxyUrl);
     const switcher = (siteConfig && typeof siteConfig.switchProxy === 'function')
       ? siteConfig.switchProxy
-      : mihomo.switchNode;
+      : provider && provider.switchNode;
+    if (typeof switcher !== 'function') return makeSwitchResult();
     let out;
     try {
       out = await switcher.call(siteConfig, siteConfig, { reason, proxyUrl, tried: [...(_proxyRotate.get(key) || [])], cached: getProxyAgents._leafCache && getProxyAgents._leafCache.get(key) });
@@ -195,10 +206,19 @@ async function trySwitchProxy(siteConfig, reason) {
     }
     if (!out || out.noop) return makeSwitchResult();
     if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true });
-    // PUT 成功才记账（provider 已追加）；缓存叶子快照供下次走单组端点省 I/O
+    if (typeof out.proxyUrl === 'string' && out.proxyUrl.trim()) {
+      siteConfig.runtimeProxyUrl = out.proxyUrl.trim();
+    }
+    // provider 返回成功后才记账；缓存节点快照，轮尽后可零请求短路
     _proxyRotate.set(key, Array.isArray(out.tried) ? out.tried : []);
     if (!getProxyAgents._leafCache) getProxyAgents._leafCache = new Map();
-    getProxyAgents._leafCache.set(key, { groupName: out.groupName, leaves: out.leaves });
+    getProxyAgents._leafCache.set(key, {
+      groupName: out.groupName,
+      leaves: out.leaves,
+      nodes: out.nodes,
+      currentTag: out.currentTag,
+      controller: out.controller
+    });
     // 换点后废弃本站旧隧道长连接：keepAlive 的代理 socket 仍指向旧出口，不复位会继续用旧 IP 请求。
     // 只清本站条目——全局 HTTP_PROXY 下兄弟站共用同一 proxyUrl 但各有独立 Agent（审查 #1）
     if (getProxyAgents._cache) {
@@ -213,15 +233,16 @@ async function trySwitchProxy(siteConfig, reason) {
   });
 }
 
-// 启动/每轮爬取前刷新 mihomo 订阅（远端 clash_fast.yaml 变动会改变节点池）。
-// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（refreshProviders 内部限频，不会频繁打 PUT）。
+// 启动/每轮爬取前刷新代理订阅（easy_proxies 读取订阅并生成 multi-port 节点）。
+// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（provider 内部限频）。
 async function refreshProxyProviders(site) {
   let siteConfig;
   try { siteConfig = getSiteConfig(site); } catch (_) { return false; }
   const proxyUrl = resolveProxyUrl(siteConfig);
-  if (!proxyUrl || !mihomo.isMihomoProxyUrl(proxyUrl)) return false;
+  const provider = getProxyProvider(siteConfig, proxyUrl);
+  if (!proxyUrl || !provider || typeof provider.refreshProviders !== 'function') return false;
   try {
-    return await mihomo.refreshProviders({ site: normalizeSite(site), reason: 'startup' });
+    return await provider.refreshProviders({ site: normalizeSite(site), reason: 'startup', siteConfig, proxyUrl });
   } catch (_) { return false; }
 }
 
@@ -437,7 +458,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         const snippet405 = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
         const extra405 = snippet405 ? ` snippet=${snippet405.slice(0, 80)}` : '';
         log(`第 ${pageNo} 页 POST 仍 405（GET→POST 双 405），不再重试直接跳过 [code=${error.code} status=${errStatus} method=${method}${extra405}]`, { level: 'error', event: 'page_failed_dual405', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
-        // 单页即换 IP：mihomo 场景轮换取下一个未试叶子节点，避免攒够 consecutive405 才熔断
+        // 单页即换 IP：easy_proxies 场景轮换取下一个未试节点，避免攒够 consecutive405 才熔断
         let sw = makeSwitchResult();
         try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
         // 第一页探针：当前出口被 WAF 拦就一路换点，直到成功或节点池轮尽（轮尽=后续页同样被拦，取消本次抓取）
@@ -609,15 +630,17 @@ function normalizeCrawlArgs(a, b, c, d) {
   };
 }
 
-// 多站共用同一代理出口的登记（proxyUrl -> 站点集合，crawl() 启动时写入）：
-// mihomo PROXY 组是控制器级单例，A 站换点会改变 B 站后续请求的出口——
-// Agent 隧道隔离解决不了组抢占，只能告警提示按站拆分代理。
+// 多站共用同一代理出口的登记（proxyUrl -> 站点集合，crawl() 启动时写入）。
+// Agent 隧道按站隔离，但同一入口的端口/出口池仍可能被多个站点共用，因此保留告警。
 const _proxySharedExit = new Map();
 
 async function crawl(a, b, c, d) {
   const { site, totalPages, interval, maxRetries } = normalizeCrawlArgs(a, b, c, d);
   const siteConfig = getSiteConfig(site);
-  // 每轮运行清空换点轮换记忆与叶子快照：上轮试过的节点本轮允许重新尝试（WAF 封禁状态
+  // 站点配置对象由 registry 复用；每轮从环境变量指定的初始端口开始，
+  // 不把上轮 405 换点后的 runtimeProxyUrl 带入下一轮。
+  delete siteConfig.runtimeProxyUrl;
+  // 每轮运行清空换点轮换记忆与节点快照：上轮试过的节点本轮允许重新尝试（WAF 封禁状态
   // 随时间变化），快照只在构建它的一轮内被信任，防订阅变更后被旧快照锁死于假轮尽。
   // 键统一走 rotateKey，与 trySwitchProxy 写侧一致（原写原始名/删 normalizeSite 名两链会错位——审查 #2）
   _proxyRotate.delete(rotateKey(site));
@@ -643,8 +666,8 @@ async function crawl(a, b, c, d) {
       const sampleUrl = typeof siteConfig.buildUrl === 'function' ? siteConfig.buildUrl.call(siteConfig, 1) : defaultBuildUrl(1, siteConfig);
       if (!isNoProxy(sampleUrl, siteConfig)) {
         log(`站点 [${site}] 已启用代理：${desensitizeProxyUrl(_proxyUrl)}`, { event: 'proxy_enabled', context: { site, proxy: desensitizeProxyUrl(_proxyUrl) }, site });
-        // 多站共用同一代理出口时提示换点互踩风险：Agent 隧道已按站隔离（审查 #1），
-        // 但 mihomo PROXY 组是控制器级单例——A 站切叶子会改变 B 站后续请求的出口
+        // 多站共用同一代理出口时提示换点互踩风险：Agent 隧道已按站隔离，
+        // 但共享入口的端口池可能使 A 站换点影响 B 站后续请求的出口。
         const siteKey = rotateKey(site);
         if (!_proxySharedExit.has(_proxyUrl)) _proxySharedExit.set(_proxyUrl, new Set());
         _proxySharedExit.get(_proxyUrl).add(siteKey);
@@ -657,12 +680,13 @@ async function crawl(a, b, c, d) {
       }
     }
   } catch (_) {}
-  // 每轮爬取前先刷新 mihomo 订阅：远端 clash_fast.yaml 变动会改变节点池，
-  // 先刷新保证本轮换点（尤其第一页探针）拿到最新节点；refreshProviders 内部限频
+  // 每轮爬取前先刷新代理订阅：先刷新保证本轮换点（尤其第一页探针）拿到最新节点；
+  // provider 内部限频，失败不阻塞本轮。
   try {
     const _refreshUrl = resolveProxyUrl(siteConfig);
-    if (_refreshUrl && mihomo.isMihomoProxyUrl(_refreshUrl)) {
-      await mihomo.refreshProviders({ site, reason: 'crawl_start' });
+    const _provider = getProxyProvider(siteConfig, _refreshUrl);
+    if (_refreshUrl && _provider && typeof _provider.refreshProviders === 'function') {
+      await _provider.refreshProviders({ site, reason: 'crawl_start', siteConfig, proxyUrl: _refreshUrl });
     }
   } catch (_) {}
   const allData = {};
@@ -747,7 +771,7 @@ async function crawl(a, b, c, d) {
       }
 
       // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，并清空换点轮换记忆
-      // 与叶子快照（下轮可从头再试各节点、按最新订阅重发现）
+      // 与节点快照（下轮可从头再试各节点、按最新订阅重发现）
       consecutive405 = 0;
       netFailStreak = 0;
       netFailSwitched = false;
@@ -798,7 +822,7 @@ async function crawl(a, b, c, d) {
       log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
-      // 网络连败换 IP：仅代理站点生效（trySwitchProxy 内部识别 mihomo，直连站为 no-op）。
+      // 网络连败换 IP：仅配置了可切换 provider 的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
       let sw = makeSwitchResult();
       try { sw = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}

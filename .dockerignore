@@ -12,3 +12,4 @@ state*.json
 test
 page_content*.html
 .claude
+easy_proxies-main

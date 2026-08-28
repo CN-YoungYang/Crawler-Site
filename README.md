@@ -22,7 +22,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 ## 环境要求
 
 - Node.js（建议 18+）；容器运行需 Docker / Docker Compose
-- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`http-proxy-agent`/`https-proxy-agent`（全站 `axios` 静态抓取，`ceb` 固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL` 代理换 IP，可选 `mihomo` sidecar 将远端 `clash_fast.yaml` 转 `http://mihomo:7890`）
+- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`http-proxy-agent`/`https-proxy-agent`（全站 `axios` 静态抓取，`ceb` 默认经 Compose 的 `easy_proxies` multi-port 代理换 IP）
 
 安装依赖：
 
@@ -68,6 +68,11 @@ node index.js
 | `HTTP_PORT` / `PORT` | 8080 | 静态服务监听端口（托管 `file/`，`EXPOSE 8080`，`ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`）；由外部反代将 `80/443 → HTTP_PORT` 以域名暴露 |
 | `HTTP_ENABLED` | true | 设为 `false` 禁用内置静态服务（仅保留爬取与报告生成） |
 | `TZ` | `Asia/Shanghai` | 容器时区，必须与 `Dockerfile` `ENV TZ` 一致，否则日期分区错一天 |
+| `CEB_PROXY_URL` / `PROXY_CEB` | Compose 中为 `http://easy_proxies:24000` | CEB 的代理入口；未设置时本地运行直连，换点时 crawler 会按健康节点改用其他业务端口 |
+| `EASY_PROXIES_CONTROLLER` | Compose 中为 `http://easy_proxies:9091` | easy_proxies 管理地址，用于 `/api/nodes`、可选 `/api/auth` 与 `/api/subscription/refresh` |
+| `EASY_PROXIES_PASSWORD` | 空 | 仅当 easy_proxies 管理面设置密码时填写；不要提交到仓库 |
+| `EASY_PROXIES_REFRESH_COOLDOWN` | 600 秒 | 订阅刷新成功后的限频窗口；失败不会写入冷却时间 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 空 | 通用代理与直连白名单；站点专用 `CEB_PROXY_URL` / `PROXY_CEB` 优先级更高 |
 
 ```bash
 SITES=yfbzb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
@@ -79,6 +84,15 @@ SITES=yfbzb,ceb SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"ceb":{"cron":"0 3 *
 
 ### Docker / Compose（推荐）
 
+首次使用先准备 easy_proxies 配置（真实订阅地址只放在未跟踪的 `config.yaml` 中）：
+
+```bash
+cp easy_proxies/config.yaml.example easy_proxies/config.yaml
+# 编辑 easy_proxies/config.yaml，填写 subscriptions，或准备 nodes.txt
+```
+
+配置字段和管理 API 以 [easy_proxies 官方 README](https://github.com/jasonwong1991/easy_proxies) 与[官方配置示例](https://github.com/jasonwong1991/easy_proxies/blob/main/config.example.yaml)为准。Compose 默认只在内部网络暴露管理端口 `9091` 和 multi-port 业务端口 `24000-24200`；需要宿主机直接访问时再在 `docker-compose.yml` 中显式取消 `ports` 注释。
+
 ```bash
 docker build -t crawler:local .
 docker compose up -d --build
@@ -87,30 +101,30 @@ curl http://127.0.0.1:8080/health | jq  # 进阶探针
 docker compose down
 ```
 
-`docker-compose.yml` 为双服务 `mihomo`（默认启用，`proxy-providers interval 1800s` 定时刷新 + `healthcheck` on `9090/proxies` + `mihomo/update-subscription.sh` 手动刷新，`depends_on mihomo:healthy`）+ `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
+`docker-compose.yml` 为双服务 `easy_proxies`（默认启用，multi-port 节点端口从 `24000` 开始，管理 API 为 `9091`）+ `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
 
 ```yaml
 services:
-  mihomo:
-    image: metacubex/mihomo:latest
-    volumes: ["./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro"]
-    ports: ["7890:7890", "9090:9090"]
-    healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/proxies >/dev/null 2>&1 || exit 1"], interval: 30s }
+  easy_proxies:
+    image: ghcr.io/jasonwong1991/easy_proxies:latest
+    volumes: ["./easy_proxies:/etc/easy_proxies"]
+    expose: ["9091", "24000-24200"]
   crawler:
-    depends_on: { mihomo: { condition: service_healthy } }
+    depends_on: { easy_proxies: { condition: service_started } }
     environment:
       - SITES=${SITES:-yfbzb,ceb}
       - HTTP_PORT=${HTTP_PORT:-8080}
       - HTTP_ENABLED=${HTTP_ENABLED:-true}
-      - HTTP_PROXY=${HTTP_PROXY:-}  # 设为 http://mihomo:7890 启用代理换 IP
-ports:
-  - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"  # 宿主机:容器，意图由外部反代 80/443 → HTTP_PORT
-volumes:
-  - ./file:/app/file
-  - ./logs:/app/logs
-healthcheck:
-  test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
-  interval: 30s
+      - CEB_PROXY_URL=${CEB_PROXY_URL:-http://easy_proxies:24000}
+      - EASY_PROXIES_CONTROLLER=${EASY_PROXIES_CONTROLLER:-http://easy_proxies:9091}
+    ports:
+      - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"  # 宿主机:容器，意图由外部反代 80/443 → HTTP_PORT
+    volumes:
+      - ./file:/app/file
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
 ```
 
 崩溃续跑如需保留 checkpoint，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-ceb.json:/app/state-ceb.json`。
@@ -149,11 +163,12 @@ server {
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/demo.js` 示例（含 `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`headers`/`proxy` 钩子）、`sites/site2.js` 占位、`sites/_base.js` 默认策略（`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`）、`sites/index.js` 注册表 `getSiteConfig(site)`/`getSiteConfigs(sites)`/`parseSitesList()`；`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 因固定 IP 被 WAF 拦时经 `HTTP_PROXY/CEB_PROXY_URL`（`http-proxy-agent/https-proxy-agent`，`NO_PROXY` 白名单）代理换 IP（`mihomo` sidecar 默认启用将远端 `clash_fast.yaml` 转 `http://mihomo:7890`，`proxy-providers interval 1800s` + 0 叶子时 `refreshProviders()` 主动刷新）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗（**第一页需总页码，双 405/网络失败会立即换 IP 重试该页一次**），mihomo 下双 405 单页即按序轮换未试过的叶子节点（结构判定不切组/auto，同批并发互斥，轮尽零请求短路，`proxy_pool_empty` 时 `PUT /providers/proxy/remote` 刷新）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies multi-port 代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
      - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
+     - 第 1 页探针因节点池轮尽返回 `gateAbort`，本轮以 `first_page_gate_abort` 结束
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
    - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。
@@ -193,7 +208,7 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + 代理换 IP（`HTTP_PROXY/CEB_PROXY_URL`；mihomo 下双 405 单页即按序轮换未试过的叶子节点——只切真实节点不切组/auto，同批并发换点自动互斥分派不同节点，轮尽零请求短路才熔断，成功页清空轮换记忆；Agent 隧道按站隔离，全局 HTTP_PROXY 多站共用时互不干扰但会提示 `proxy_shared_exit` 换点互踩风险），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies multi-port 换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；Agent 隧道按站隔离），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 
@@ -207,21 +222,25 @@ crawler/
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/getSiteConfigs(sites)/parseSitesList()/listEnabledSites()
 │   ├── _base.js          # 默认策略：defaultBuildUrl/defaultParse/defaultExtractId/defaultIsBoundary
-│   ├── _mihomo.js        # mihomo provider：switchNode/refreshProviders（叶子轮换+订阅刷新）
+│   ├── _easy_proxies.js  # 默认 provider：管理 API、健康节点发现、multi-port 轮换与订阅刷新
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   ├── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
 │   ├── demo.js           # 策略示例：buildUrl/parse/isBoundary/batchSize 等钩子示例
 │   └── site2.js          # 占位骨架：baseUrl 为空，fail-fast
+├── test/                 # 8 个零依赖 Node 测试套件与 fixtures
+│   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
+│   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
-├── docker-compose.yml    # 双服务 mihomo(默认启用，interval 1800s，healthcheck 9090/proxies，update-subscription.sh) + crawler 一容器多站点并发编排（SITES 列表 + CRON_<SITE> + HTTP_PORT/healthcheck + mem 400m，HTTP_PROXY 经 mihomo:7890 注入）
+├── docker-compose.yml    # 双服务 easy_proxies(默认启用，multi-port 24000+，管理 API 9091) + crawler 一容器多站点并发编排
 ├── .dockerignore
-├── mihomo/
-│   ├── config.yaml.example  # proxy-providers remote 订阅示例（interval 1800s）
-│   └── update-subscription.sh  # 手动 PUT /providers/proxy/remote 刷新脚本
+├── easy_proxies/
+│   └── config.yaml.example  # multi-port 代理池与管理 API 示例
 ├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
 ├── docs/
 │   ├── adr/0001-docker-site-isolation.md  # Docker/GHCR/多站点隔离/导航静态服务决策
+│   ├── adr/0002-ceb-keep-legacy-source.md # ceb 旧源与 ctbpsp 切换结论
+│   ├── progress-ceb-ctbpsp.md              # ctbpsp 迁移终止与归档说明
 │   └── agents/domain.md / issue-tracker.md
 ├── page_content.html     # 一份历史页面样本，离线验证 cheerio 选择器用
 ├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（bind mount 持久化，server.js 托管）
@@ -229,7 +248,8 @@ crawler/
 ├── state-<site>.json     # 按站点 checkpoint（每批写入，正常完成即删）
 ├── package.json
 ├── CLAUDE.md             # 给 AI 助手的代码库指引
-└── AGENTS.md             # 贡献者指南
+├── AGENTS.md             # 贡献者指南
+└── TODOLIST.md           # easy_proxies 接入与环境验证清单
 ```
 
 ## 已知限制
@@ -237,7 +257,7 @@ crawler/
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
-- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认启用代理换 IP 应对（`HTTP_PROXY/CEB_PROXY_URL` 经 `mihomo` sidecar 默认启用，`proxy-providers interval 1800s` + 0 叶子时 `refreshProviders()` 自动刷新，不增镜像体积）；其余站点直连，届时可按需单站代理。
+- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 multi-port 换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶，`demo` 排除），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITE=site2` 会 fail-fast（未实现占位），`SITES=yfbzb,site2` 在多站点模式下占位站点 warn 跳过。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

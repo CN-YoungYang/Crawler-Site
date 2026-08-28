@@ -1,24 +1,20 @@
 services:
-  # 代理 sidecar：Oracle 固定 IP 被 ceb WAF 拦时，mihomo 将远端 clash_fast.yaml 转为本地 HTTP 代理
-  # 远端订阅由 https://xxx.xxx.xxx.xxx/NodeMergeClash/output/clash_fast.yaml（另一台机器定时更新）提供
-  # 默认启用；如需直连可注释本段并移除 crawler 的 HTTP_PROXY/CEB_PROXY_URL
-  # 启用步骤：cp mihomo/config.yaml.example mihomo/config.yaml && 按需编辑订阅 URL && docker compose up -d --build
-  # 验证：curl http://127.0.0.1:7890/proxies | jq / curl -s http://127.0.0.1:9090/proxies | jq '.proxies.PROXY.all | length'
-  mihomo:
-    image: metacubex/mihomo:latest
-    container_name: mihomo
+  # 代理 sidecar：easy_proxies 为 CEB 提供 multi-port 独立节点入口。
+  # 首次使用：cp easy_proxies/config.yaml.example easy_proxies/config.yaml，再填写 subscriptions。
+  # crawler 通过 easy_proxies:9091 获取健康节点；CEB 默认从 24000 端口开始。
+  easy_proxies:
+    image: ghcr.io/jasonwong1991/easy_proxies:latest
+    container_name: easy_proxies
     volumes:
-      - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
-    ports:
-      - "7890:7890"   # mixed-port，供 crawler 的 HTTP_PROXY=http://mihomo:7890 消费
-      - "9090:9090"   # external-controller
+      - ./easy_proxies:/etc/easy_proxies
+    expose:
+      - "9091"
+      - "24000-24200"
+    # 如需从宿主机访问管理面板/独立代理端口，再取消下面注释；默认只在 Compose 网络内开放。
+    # ports:
+    #   - "9091:9091"
+    #   - "24000-24200:24000-24200"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/proxies >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
 
   crawler:
     image: rxyoungyang/crawler:latest
@@ -31,18 +27,18 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - HTTP_PORT=${HTTP_PORT:-8080}
       - HTTP_ENABLED=${HTTP_ENABLED:-true}
-      # 代理（可选，ceb 被封时启用其一）：
-      # - 全站：HTTP_PROXY=http://mihomo:7890 （需 mihomo sidecar 已启用）或宿主机 Clash http://host.docker.internal:7890
-      # - 单站：CEB_PROXY_URL=http://mihomo:7890 / PROXY_CEB=http://mihomo:7890
+      # 代理：CEB 默认使用 easy_proxies 的第一个 multi-port 节点；切点时由 crawler 动态改端口。
+      # - 全站：HTTP_PROXY=http://easy_proxies:24000（不建议，yfbzb 通常应直连）
+      # - 单站：CEB_PROXY_URL=http://easy_proxies:24000 / PROXY_CEB=http://easy_proxies:24000
       # - 白名单：NO_PROXY=localhost,127.0.0.1,yfbzb.com
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}
       - PROXY_CEB=${PROXY_CEB:-}
-      - CEB_PROXY_URL=${CEB_PROXY_URL:-}
-      - MIHOMO_REFRESH_COOLDOWN=${MIHOMO_REFRESH_COOLDOWN:-}
-      - MIHOMO_CONTROLLER=${MIHOMO_CONTROLLER:-}
-      - MIHOMO_SECRET=${MIHOMO_SECRET:-}
+      - CEB_PROXY_URL=${CEB_PROXY_URL:-http://easy_proxies:24000}
+      - EASY_PROXIES_CONTROLLER=${EASY_PROXIES_CONTROLLER:-http://easy_proxies:9091}
+      - EASY_PROXIES_PASSWORD=${EASY_PROXIES_PASSWORD:-}
+      - EASY_PROXIES_REFRESH_COOLDOWN=${EASY_PROXIES_REFRESH_COOLDOWN:-}
     ports:
       - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
     volumes:
@@ -52,11 +48,9 @@ services:
       # - ./state-yfbzb.json:/app/state-yfbzb.json
       # - ./state-ceb.json:/app/state-ceb.json
       # - ./state-site2.json:/app/state-site2.json
-      # 代理 sidecar 配置（启用 mihomo 时挂载）
-      # - ./mihomo/config.yaml:/app/mihomo-config.yaml:ro
     depends_on:
-      mihomo:
-        condition: service_healthy
+      easy_proxies:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:'+(process.env.HTTP_PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]

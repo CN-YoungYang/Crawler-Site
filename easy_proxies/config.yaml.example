@@ -1,0 +1,52 @@
+# Easy Proxies 配置示例：为 crawler 提供 CEB 的独立 HTTP 代理端口。
+# 首次使用：复制为 config.yaml，并填写 subscriptions 或 nodes_file。
+
+mode: multi-port
+log_level: info
+
+listener:
+  address: 0.0.0.0
+  port: 2323
+  username: ""
+  password: ""
+
+multi_port:
+  address: 0.0.0.0
+  base_port: 24000
+  username: ""
+  password: ""
+
+pool:
+  mode: sequential
+  failure_threshold: 3
+  blacklist_duration: 1h
+  retry_enabled: true
+  retry_attempts: 3
+
+management:
+  enabled: true
+  listen: 0.0.0.0:9091
+  probe_target: http://cp.cloudflare.com/generate_204
+  password: ""
+
+dns:
+  server: 223.5.5.5
+  fallback_servers:
+    - 8.8.8.8
+    - 1.1.1.1
+  port: 53
+  strategy: prefer_ipv4
+
+subscription_refresh:
+  enabled: true
+  interval: 30m
+  timeout: 30s
+  fetch_concurrency: 16
+  health_check_timeout: 60s
+  min_available_nodes: 1
+
+subscriptions:
+  # - "https://your-host.example/clash_fast.yaml"
+
+# 也可以改为手工节点文件；每行一个代理 URI。
+nodes_file: nodes.txt
