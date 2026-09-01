@@ -1,4 +1,4 @@
-// 一行真实结构（取自 page_content.html 第一行），作为 fixture 的独立真相源。
+// 一行真实结构（取自 yfbzb 真实列表页第一行），作为 fixture 的独立真相源。
 // id = 20250930_542694266；第二行是另一条新记录，用于断言多行场景。
 const ROW_KNOWN = `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/20250930_542694266.html">孝感市特殊教育学校2025年09政府采购意向</a></td><td>招标预告</td><td>湖北孝感</td><td>2025/09/30</td></tr>`;
 const ROW_NEW = `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/20250930_999999999.html">某新单位采购意向</a></td><td>招标预告</td><td>湖北武汉</td><td>2025/09/30</td></tr>`;
@@ -12,7 +12,7 @@ function yfbzbRow(id) {
   return `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/${id}.html">测试单位采购意向</a></td><td>招标预告</td><td>湖北武汉</td><td>2025/09/30</td></tr>`;
 }
 
-// yfbzb 分页控件（结构仿真史快照 page_content.html）：
+// yfbzb 分页控件（结构仿真 yfbzb 真实分页）：
 // 数字页码链接 + li.controls 文本「当前 <input> / <input> 条，共 N 条」
 function yfbzbPagination({ totalRecords, pageSize = 30, lastPage }) {
   const pages = lastPage || Math.ceil(totalRecords / pageSize);
@@ -29,7 +29,7 @@ function yfbzbPagination({ totalRecords, pageSize = 30, lastPage }) {
     + `</ul></div>`;
 }
 
-// ceb 分页控件（结构仿真史快照 page_content_ceb.html）：
+// ceb 分页控件（结构仿真 ceb 真实分页）：
 // 「共N页 当前页是第1页」+ 隐藏域 #pageTotal（历史快照值带尾随空格且与共N页矛盾）
 function cebPagination(pages, pageTotalValue) {
   const hidden = pageTotalValue === undefined ? '' : `<input type="hidden" id ="pageTotal" name="pageTotal" value="${pageTotalValue} "/>`;

@@ -82,7 +82,7 @@ function validateInput(input) {
     console.error('输入无效，请确保所有参数都是有效的正数，且最大延迟不小于最小延迟');
     console.log('使用方法: node index.js [页数] [间隔时间(毫秒)] [最小延迟(秒)] [最大延迟(秒)]');
     console.log('例如: node index.js 100 5000 0 300');
-    console.log('或通过环境变量: SITES=yfbzb,site2 TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *"');
+    console.log('或通过环境变量: SITES=yfbzb,ceb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *"');
     process.exit(1);
   }
 

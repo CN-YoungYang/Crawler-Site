@@ -35,7 +35,7 @@ module.exports = {
     area: 'td:nth-child(3)',
     publishTime: 'td:nth-child(4)'
   },
-  // 可选策略钩子（全部可选，缺省走 _base.js 默认行为）：
+  // 可选策略钩子（全部可选，缺省走 crawler.js 内联默认行为）：
   // buildUrl(pageNo) { return `${this.baseUrl}${pageNo}${this.urlSuffix}`; },
   // extractId(link) { return link.split('/').pop().split('.')[0]; },
   // isBoundary(error) { return error?.response?.status === 403; },

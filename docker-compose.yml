@@ -47,7 +47,6 @@ services:
       # 崩溃续跑 checkpoint（按需挂载）
       # - ./state-yfbzb.json:/app/state-yfbzb.json
       # - ./state-ceb.json:/app/state-ceb.json
-      # - ./state-site2.json:/app/state-site2.json
     depends_on:
       easy_proxies:
         condition: service_started

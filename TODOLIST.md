@@ -1,6 +1,6 @@
 # easy_proxies 迁移 TODO
 
-更新时间：2026-08-28
+更新时间：2026-09-01
 
 ## 当前已完成
 
@@ -38,6 +38,7 @@
 - [x] 更新 `README.md`、`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、两份 ADR 和进度记录中的代理部署说明。
 - [x] 修正 README Compose 示例缩进、第一页探针描述、easy_proxies 环境变量、配置准备步骤和当前 8 套件验证状态。
 - [x] 清理 Markdown 中的旧代理名称、旧控制面端口/配置模型和过时的 6 套件/“只重试一次”描述；通用 `docs/agents/` 文档无需领域内容变更。
+- [x] 清理已删文件的过时引用：`sites/_base.js`（已内联进 `crawler.js`）、`sites/demo.js`/`sites/site2.js`（注册表仅 `yfbzb`/`ceb`）、`page_content.html`（已移除）——在 `README.md`/`AGENTS.md`/`CLAUDE.md`/`CONTEXT.md`/`docs/adr/0001-*.md`/`.env.example`/`docker-compose.yml`/`.dockerignore`/`index.js`/`sites/yfbzb.js`/`test/fixtures.js` 中改为指向 `crawler.js` 内联默认或注册表说明；保留 `crawler.js:11` 与 `CLAUDE.md:64` 的迁移溯源说明。
 - [x] `crawler.js`、`sites/_easy_proxies.js` 语法检查通过；Compose 语法检查待 Docker 环境执行。
 - [x] 执行 `git diff --check`，没有空白错误。
 
@@ -57,11 +58,21 @@ docker compose logs -f easy_proxies crawler
 - [x] `npm test` 已通过（8 个测试套件）。
 - [ ] Docker 未安装于当前环境，上述镜像启动、Compose 校验、健康检查和真实 CEB 请求尚未执行。
 
-- [ ] 确认 `/health` 返回 `status: "ok"`。
+- [x] 确认 `/health` 返回 `status: "ok"`（本机 `node` 直接启动 `server.js` 探针：`/health`→200 `status:ok` navExists:true；`/`→导航 200；`/yfbzb/`→站点页 200；404/HEAD 正常）。
 - [ ] 确认 CEB 通过代理请求，且日志不泄露订阅地址、密码或节点 IP。
-- [ ] 通过测试或真实日志确认：GET 405 → POST 405 → 换端口 → 当前页重新请求。
+- [ ] 通过测试或真实日志确认：GET 405 → POST 405 → 换端口 → 当前页重新请求（测试 `test/dual405.test.js` 已覆盖契约，真实链路待 Docker）。
 - [ ] 确认换端口后旧 keep-alive Agent 被销毁，不会继续复用旧出口。
-- [ ] 确认节点池轮尽时本轮抓取停止，不会无限重试或跳过 405 页面。
+- [ ] 确认节点池轮尽时本轮抓取停止，不会无限重试或跳过 405 页面（测试已覆盖 `gateAbort`/`first_page_gate_abort`，真实链路待 Docker）。
+
+## 本机已验证（无 Docker）
+
+- [x] `npm test` 8 套件全过。
+- [x] 核心模块语法检查：`index.js`/`crawler.js`/`server.js`/`report.js`/`log.js`/`sites/{_easy_proxies,index,yfbzb,ceb}.js` 均 `node --check` 通过。
+- [x] `git diff --check` 无空白错误，工作树干净。
+- [x] 静态服务路由探针：`/health`（`status:ok`+`navExists`+`navGeneratedAt`）、`/`（总导航）、`/yfbzb/`（站点索引）、404、HEAD 均符合预期。
+- [x] `generateNav()`：默认仅 `yfbzb`；`SITES=yfbzb,ceb` 后导航含 2 站点卡片。
+- [x] `generateReport('yfbzb')`：270 条 / 1 明细页；`generateReport('ceb')`：60 条 / 2 明细页。
+- [x] `.gitignore` 覆盖 `easy_proxies/config.yaml`、`nodes.txt`、`node_ports.json`、`.env*`，运行时文件不泄露。
 
 ## 接入前配置
 

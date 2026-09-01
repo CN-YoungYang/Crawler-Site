@@ -418,7 +418,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         return { pageData: [], failed: false, realTotalPages };
       }
 
-      // 走默认 selectors 解析（委托 _base）；显式传入解析后的 selectors（含 yfbzb 兜底），
+      // 走默认 selectors 解析（crawler.js 内联 defaultParse）；显式传入解析后的 selectors（含 yfbzb 兜底），
       // 否则缺 selectors 的站点（如旧签名/测试站点）行数检查通过但解析拿到空行
       const pageData = defaultParse($, response.data, existingIds, { ...siteConfig, selectors, linkPrefix, extractId: siteConfig.extractId || defaultExtractId });
 

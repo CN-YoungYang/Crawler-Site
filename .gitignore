@@ -37,7 +37,6 @@ coverage/
 .nyc_output/
 
 
-easy_proxies-main/
 easy_proxies/config.yaml
 easy_proxies/nodes.txt
 easy_proxies/node_ports.json
