@@ -69,7 +69,6 @@
     padding: var(--space-lg);
     margin-bottom: var(--space-xl);
     border: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
   }
   .stat-item { display: flex; flex-direction: column; gap: 0.25rem; }
   .stat-label { font-size: 0.75rem; color: var(--fg-muted); font-weight: 500; }
@@ -82,7 +81,7 @@
     align-items: baseline;
     margin-bottom: var(--space-sm);
   }
-  .section-title { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 1.45rem; font-weight: 700; }
+  .section-title { margin: 0; font-size: 1.45rem; font-weight: 700; }
   .filter-status { color: var(--fg-muted); font-family: var(--font-mono); font-size: 0.75rem; }
 
   .filter-controls {
@@ -147,7 +146,7 @@
 
   .date-grid {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
     gap: 0.75rem;
     width: 100%;
   }
@@ -257,21 +256,12 @@
   [hidden] { display: none !important; }
   .row-hidden { display: none !important; }
 
-  @media (min-width: 981px) and (max-width: 1180px) {
-    .date-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  }
-
-  @media (min-width: 641px) and (max-width: 980px) {
-    .date-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  }
-
   @media (max-width: 640px) {
     .stats-grid { grid-template-columns: 1fr; gap: var(--space-lg); }
     .retention-banner { grid-template-columns: 1fr; gap: 0.25rem; }
     .retention-copy { justify-self: start; text-align: left; }
     .filter-controls { flex-direction: column; }
     .search-input { max-width: 100%; }
-    .date-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .date-item { min-height: 5rem; padding: 0.8rem; }
     .latest-more-link { align-self: flex-start; }
     .data-table th, .data-table td { padding-right: var(--space-sm); }

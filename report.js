@@ -219,7 +219,7 @@ const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
 
   --fg: #1c1c1a;
   --fg-muted: #7a7670;
-  --fg-faint: #9a9590;
+  --fg-faint: #7a7670;
 
   --border: #e8e2d9;
   --border-strong: #c8bdb0;
@@ -253,7 +253,7 @@ const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
 
     --fg: #f5f4f1;
     --fg-muted: #a1a1aa;
-    --fg-faint: #71717a;
+    --fg-faint: #a1a1aa;
 
     --border: #27272a;
     --border-strong: #3f3f46;
@@ -533,7 +533,6 @@ function buildIndexHtml(files) {
       var meta = document.createElement('span');
       meta.className = 'date-item-meta';
 
-      var count = item.querySelector('.date-item-count');
       meta.appendChild(count);
 
       var arrow = document.createElement('span');
