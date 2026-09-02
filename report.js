@@ -278,7 +278,8 @@ function buildNavHtml(sitesData) {
   const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false });
   const totalSites = sitesData.length;
   const totalRecords = sitesData.reduce((n, s) => n + s.totalRecords, 0);
-  const totalDates = sitesData.reduce((n, s) => n + s.totalDates, 0);
+  // 覆盖天数 = 跨站去重后的唯一日历天数（各站可能同一天都有数据，累加会重复计数）
+  const totalDates = new Set(sitesData.flatMap(s => (s.files || []).map(f => f.date))).size;
 
   const rowsHtml = sitesData.map((s, idx) => {
     const hasData = s.totalDates > 0;
@@ -339,7 +340,7 @@ function buildNavHtml(sitesData) {
     </div>
     <div class="nav-hero-stats" aria-label="汇总统计">
       <div class="nav-hero-stat"><span class="nav-hero-stat-label">站点</span><span class="nav-hero-stat-value">${totalSites.toLocaleString('zh-CN')}</span></div>
-      <div class="nav-hero-stat"><span class="nav-hero-stat-label">日期</span><span class="nav-hero-stat-value">${totalDates.toLocaleString('zh-CN')}</span></div>
+      <div class="nav-hero-stat"><span class="nav-hero-stat-label">覆盖天数</span><span class="nav-hero-stat-value">${totalDates.toLocaleString('zh-CN')}</span></div>
       <div class="nav-hero-stat"><span class="nav-hero-stat-label">记录</span><span class="nav-hero-stat-value">${totalRecords.toLocaleString('zh-CN')}</span></div>
       <div class="nav-hero-stat nav-hero-stat--accent"><span class="nav-hero-stat-label">生成时间</span><span class="nav-hero-stat-value small">${generatedAt}</span></div>
     </div>
