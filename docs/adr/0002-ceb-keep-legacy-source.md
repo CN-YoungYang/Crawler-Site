@@ -16,7 +16,7 @@
 
 ## 决策
 
-1. **ceb 维持旧源** `bulletin.cebpubservice.com` + 代理换 IP（ADR 0001 方案不变）；当前 `sites/ceb.js`/`crawler.js` 保持旧源抓取，并由 easy_proxies multi-port 提供可切换出口；当前回归为 `npm test` 8/8 套件通过。
+1. **ceb 维持旧源** `bulletin.cebpubservice.com` + 代理换 IP（ADR 0001 方案不变）；当前 `sites/ceb.js`/`crawler.js` 保持旧源抓取，并由 easy_proxies multi-port 提供可切换出口；当前回归为 `npm test` 9/9 套件通过。
 2. **ctbpsp 成果归档不入仓**：`jsreverse-yidun/`（`.gitignore` 排除）含可直接切回的 `ctbpsp-implementation/ceb.ctbpsp.js`+`crawler.ctbpsp.js`（三级盾处置+熔断）、易盾纯协议实现（`result/src/`）、完整取证与 trace 证据（`case/`）、协议文档（`case/notes/entry-chain.md`）。
 3. **切回条件**（届时覆盖归档实现即可）：服务端对静默无感放行，或接受打码平台成本（自动解 type=9 点选，每页一票）。
 4. **勿重复攻坚**：卡点是服务端策略，非求解器/沙箱/指纹技术问题；重复投入无收益。

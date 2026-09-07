@@ -1,6 +1,6 @@
 # Crawler-Site
 
-Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口）与 `ceb`（中国招标投标公共服务平台·湖北），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 GHCR 自动发布。内置轻量静态服务托管 `file/`，根 `/` 为总导航（动态发现 `yfbzb`/`ceb` 入口），每站报告在 `/<site>/`，`GET /health` 提供进阶探针供反代/监控与 `docker healthcheck` 使用，适合通过外部反代以域名对外暴露。
+Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口）与 `ceb`（中国招标投标公共服务平台·湖北），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 Docker Hub 自动发布。内置轻量静态服务托管 `file/`，根 `/` 为总导航（动态发现 `yfbzb`/`ceb` 入口），每站报告在 `/<site>/`，`GET /health` 提供轻量存活探针供反代/监控与 `docker healthcheck` 使用，适合通过外部反代以域名对外暴露。
 
 > ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`headers`，默认值内联于 `crawler.js` 的 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`），`sites/yfbzb.js` 与 `sites/ceb.js` 为当前实站，注册表 `sites/index.js` 仅含这两站。
 
@@ -11,7 +11,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 按站点与发布日期分区存储为 Excel：`file/<site>/YYYY-MM-DD.xlsx`（如 `file/yfbzb/2026-08-19.xlsx`），历史扁平 `file/*.xlsx` 保留不迁移
 - 总导航 + 站点报告：`file/index.html` 总导航（动态发现 `sites/*`，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
 - 轻量静态服务：`server.js`（零依赖 `http`）托管 `file/` 于 `HTTP_PORT`（默认 8080，`EXPOSE 8080`），路由 `/` → 总导航、`/yfbzb/`/`/ceb/` → 各站报告、`HEAD` 支持、`xlsx` 下载头、防路径穿越，`HTTP_ENABLED=false` 可禁用；`docker-compose.yml` 已配 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` 与 `healthcheck`，适合由外部反代（Nginx/Caddy/Traefik）将 `80/443 → 8080` 以域名暴露
-- 进阶健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites,dates,records}, sites:[{site,displayName,description,totalDates,totalRecords,latestUpdate,hasReport}]}`（`no-store`），供 `docker healthcheck`、反代后端摘除与监控告警使用
+- 轻量健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}`（`no-store`），不在高频探针中扫描 xlsx；供 `docker healthcheck`、反代后端摘除与监控告警使用
 - 失败页与“数据到底”分离识别，越界页（403）不再误判为加载失败、不会因单页失败而提前终止整次爬取
 - 失败日志带 `error.code` / HTTP `status`，便于诊断
 - 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
@@ -31,6 +31,8 @@ npm install
 ```
 
 ## 使用方法
+
+正式部署（Docker Compose）请先阅读：[DEPLOY.md](DEPLOY.md)。
 
 ### 本地（宿主机）
 
@@ -97,7 +99,7 @@ cp easy_proxies/config.yaml.example easy_proxies/config.yaml
 docker build -t crawler:local .
 docker compose up -d --build
 docker compose logs -f crawler
-curl http://127.0.0.1:8080/health | jq  # 进阶探针
+curl http://127.0.0.1:8080/health | jq  # 轻量存活探针
 docker compose down
 ```
 
@@ -151,7 +153,7 @@ server {
   [2026-08-14T06:35:01.113Z] [PID: 10572] [yfbzb] 第 10 页无新增数据（站点边界），已爬至当日末尾
   ```
 
-- **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 进阶探针、`GET /<site>/<date>.xlsx` → 下载。
+- **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 轻量存活探针、`GET /<site>/<date>.xlsx` → 下载。
 - **Checkpoint**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
 
 ## 工作原理
@@ -186,14 +188,14 @@ server {
 
 当日真实数据边界以实际 403 为准；不要把站点展示的近 1 个月存量总数当作当日可访问页数。真实总页数只取自分页控件（`.pagination` 子树内「共 N 条」÷ pageSize /「共 N 页」），绝不读统计横幅的存量总数（如 yfbzb「近1个月共76470条」）。
 
-## GHCR 自动构建
+## Docker Hub 自动构建
 
 `.github/workflows/docker-build.yml` 在 `push main` / `tag v*` / `workflow_dispatch` 时触发：
 
 - `npm ci` + `npm test` 门禁
 - `docker/build-push-action` 多架构 `linux/amd64,linux/arm64`（`setup-qemu` + `setup-buildx`），`gha` 缓存
 - `docker/metadata-action` 生成标签：`latest`（仅 `main`）+ `sha` + `semver`/`major.minor`
-- 推送至 `ghcr.io/<owner>/crawler`（需仓库 `Settings > Actions > Workflow permissions` 开 `Read and write`）
+- 推送至 Docker Hub `${DOCKERHUB_USERNAME}/crawler`（需配置仓库 Secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`）
 
 ## 可调常量
 
@@ -218,24 +220,25 @@ crawler/
 ├── crawler.js            # 爬取核心：crawl() 编排（含真实总页数收窄上限）+ crawlPage() 逐页抓取 + checkpoint（按站点）
 ├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
 ├── report.js             # 报告：scanFiles/generateReport 按站点生成 HTML，generateNav/buildNavHtml 生成总导航 file/index.html
-├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 进阶探针
+├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 轻量存活探针
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/parseSitesList()/listEnabledSites()（仅 yfbzb/ceb）
 │   ├── _easy_proxies.js  # 默认 provider：管理 API、健康节点发现、multi-port 轮换与订阅刷新
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 8 个零依赖 Node 测试套件与 fixtures
+├── test/                 # 9 个零依赖 Node 测试套件与 fixtures
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
 ├── docker-compose.yml    # 双服务 easy_proxies(默认启用，multi-port 24000+，管理 API 9091) + crawler 一容器多站点并发编排
+├── DEPLOY.md             # Docker Compose 部署、验证、更新与故障排查手册
 ├── .dockerignore
 ├── easy_proxies/
 │   └── config.yaml.example  # multi-port 代理池与管理 API 示例
-├── .github/workflows/docker-build.yml  # GHCR 构建推送（npm test 门禁，多架构）
+├── .github/workflows/docker-build.yml  # Docker Hub 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
 ├── docs/
-│   ├── adr/0001-docker-site-isolation.md  # Docker/GHCR/多站点隔离/导航静态服务决策
+│   ├── adr/0001-docker-site-isolation.md  # Docker/Docker Hub/多站点隔离/导航静态服务决策
 │   ├── adr/0002-ceb-keep-legacy-source.md # ceb 旧源与 ctbpsp 切换结论
 │   ├── progress-ceb-ctbpsp.md              # ctbpsp 迁移终止与归档说明
 │   └── agents/domain.md / issue-tracker.md
@@ -254,6 +257,6 @@ crawler/
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 multi-port 换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
-- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶），缺失站点报告自动补空占位；健康探针 `GET /health` 每次实时 `scanFiles` 统计 `totalRecords`（读 xlsx），数据量极大时探针会有秒级开销。
+- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶），缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会 warn 跳过，单站点 `SITE=<未知>` 则 fail-fast。
 - agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

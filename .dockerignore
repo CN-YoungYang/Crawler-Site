@@ -11,3 +11,11 @@ state*.json
 !README.md
 test
 .claude
+
+# Local environment and easy_proxies runtime secrets must stay out of Docker build context.
+.env
+.env.*
+!.env.example
+easy_proxies/config.yaml
+easy_proxies/nodes.txt
+easy_proxies/node_ports.json

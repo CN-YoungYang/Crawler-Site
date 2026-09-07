@@ -34,7 +34,12 @@ function resolveFileRoot() {
 
 function safeJoin(root, urlPath) {
   // 去掉 query/hash，解码，防目录穿越
-  const clean = decodeURIComponent(urlPath.split('?')[0].split('#')[0]);
+  let clean;
+  try {
+    clean = decodeURIComponent(urlPath.split('?')[0].split('#')[0]);
+  } catch (_) {
+    return null;
+  }
   const joined = path.join(root, clean);
   const relative = path.relative(root, joined);
   if (relative.startsWith('..') || path.isAbsolute(relative) && relative.includes('..')) {

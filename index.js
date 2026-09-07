@@ -4,12 +4,17 @@ const { log } = require('./log');
 const { startServer } = require('./server');
 const { getSiteConfig, normalizeSite, parseSitesList } = require('./sites');
 
+function parseInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function parseArguments() {
   const args = process.argv.slice(2);
-  const totalPages = parseInt(args[0]) || 100;
-  const interval = parseInt(args[1]) || 5000;
-  const minDelay = parseInt(args[2]) || 0;
-  const maxDelay = parseInt(args[3]) || 300;
+  const totalPages = parseInteger(args[0], 100);
+  const interval = parseInteger(args[1], 5000);
+  const minDelay = parseInteger(args[2], 0);
+  const maxDelay = parseInteger(args[3], 300);
   return { totalPages, interval, minDelay, maxDelay };
 }
 
@@ -353,4 +358,4 @@ if (require.main === module) {
   scheduleLoop(env);
 }
 
-module.exports = { parseEnv, nextCronDelay, validateInput, getRandomDelay, scheduleLoop, scheduleLoopForSite, sleepInterruptible, parsePerSiteOverrides: parsePerSiteOverrides };
+module.exports = { parseArguments, parseEnv, nextCronDelay, validateInput, getRandomDelay, scheduleLoop, scheduleLoopForSite, sleepInterruptible, parsePerSiteOverrides: parsePerSiteOverrides };

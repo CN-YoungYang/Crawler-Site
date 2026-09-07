@@ -154,6 +154,33 @@ async function main() {
   }
 
   console.log('crawl 终止条件: OK');
+  // File write errors must rewind the checkpoint to the first page of this run.
+  {
+    const xlsx = require('xlsx');
+    const originalWriteFile = xlsx.writeFile;
+    const restoreAxios = mockAxios(() => ({
+      status: 200,
+      data: pageHtml([yfbzbRow('999999991')])
+    }));
+    let checkpoint;
+    xlsx.writeFile = () => {
+      const error = new Error('simulated disk failure');
+      error.code = 'EIO';
+      throw error;
+    };
+    try {
+      const { crawl } = freshCrawler();
+      await withTempCwd(async () => {
+        await crawl(1, 0);
+        checkpoint = JSON.parse(fs.readFileSync('state-yfbzb.json', 'utf8'));
+      });
+    } finally {
+      xlsx.writeFile = originalWriteFile;
+      restoreAxios();
+    }
+    assert.strictEqual(checkpoint.currentPage, 1, 'file write failure must rewind to the run start page');
+    assert.deepStrictEqual(checkpoint.existingIds, [], 'failed rows must not remain marked as persisted');
+  }
 }
 
 main().catch(e => { console.error('FAIL', e.message); process.exit(1); });

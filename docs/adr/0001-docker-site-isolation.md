@@ -1,9 +1,9 @@
-# ADR 0001 — Docker 化、GHCR 自动构建与多站点隔离
+# ADR 0001 — Docker 化、Docker Hub 自动构建与多站点隔离
 
 - **日期**: 2026-08-19
 - **状态**: 已采纳（2026-08-28 更新：`ceb` 使用 easy_proxies multi-port 换 IP）
-- **上下文**: 见 `CONTEXT.md`；原项目为裸 `node index.js [pages] [interval] [minDelay] [maxDelay]` 一次性批处理，`file/`/`logs/`/`state.json` 落 cwd，无镜像、无 CI、换机器即丢数据。用户要求常驻容器、GHCR 自动发布，并为多站点预留可演进的扩展位，产物按 `file/<site>/` 分站点隔离、旧数据不迁移。2026-08-20 修订为 **一容器并发多站点、各站独立逻辑与定时**（策略化）；2026-08-21 修订 `ceb` 为 **代理换 IP** 根治固定 IP 下 WAF 405，当前由 `easy_proxies` sidecar 的 multi-port 提供代理入口。
-- **关联约束**: 8+2 约束已收敛（常驻 / 环境变量 / `TZ=Asia/Shanghai` / GHCR / 配置对象占位 / `file/<site>/`+日志隔离 / 一容器多站点并发 / 策略化 / 不迁移），详见 `CLAUDE.md`。
+- **上下文**: 见 `CONTEXT.md`；原项目为裸 `node index.js [pages] [interval] [minDelay] [maxDelay]` 一次性批处理，`file/`/`logs/`/`state.json` 落 cwd，无镜像、无 CI、换机器即丢数据。用户要求常驻容器、Docker Hub 自动发布，并为多站点预留可演进的扩展位，产物按 `file/<site>/` 分站点隔离、旧数据不迁移。2026-08-20 修订为 **一容器并发多站点、各站独立逻辑与定时**（策略化）；2026-08-21 修订 `ceb` 为 **代理换 IP** 根治固定 IP 下 WAF 405，当前由 `easy_proxies` sidecar 的 multi-port 提供代理入口。
+- **关联约束**: 8+2 约束已收敛（常驻 / 环境变量 / `TZ=Asia/Shanghai` / Docker Hub / 配置对象占位 / `file/<site>/`+日志隔离 / 一容器多站点并发 / 策略化 / 不迁移），详见 `CLAUDE.md`。
 
 ## 决策
 
@@ -22,8 +22,8 @@
    - `Dockerfile`: `node:20-alpine` + `tzdata`/`ca-certificates`/`ttf-freefont`/`su-exec` + `ENV TZ=Asia/Shanghai` + `WORKDIR /app` + `EXPOSE 8080` + `ENTRYPOINT ["node","index.js"]`。未固定时区会导致 `readRecentIds()`/`publishTime` 分区按 UTC 错一天。
    - 代理实现（`ceb`）：`package.json` 声明 `http-proxy-agent`/`https-proxy-agent`，`crawler.js` 使用 `resolveProxyUrl`/`getProxyAgents`/`isNoProxy` 注入 `axios`（`proxy:false + httpAgent/httpsAgent`），Compose 透传 `CEB_PROXY_URL` 并由 easy_proxies sidecar 提供独立端口。
 
-5. **GHCR 发布**
-   - `.github/workflows/docker-build.yml`: `push main` / `tag v*` / `workflow_dispatch` 触发，`setup-qemu`+`setup-buildx` 多架构 `linux/amd64,linux/arm64`，`docker/metadata-action` 生成 `latest`（仅 main）+ `sha` + `semver`/`major.minor`，`gha` 缓存，`npm ci`+`npm test` 门禁，推送至 `ghcr.io/<owner>/crawler`（需 `Settings > Actions > Workflow permissions: Read and write`）。
+5. **Docker Hub 发布**
+   - `.github/workflows/docker-build.yml`: `push main` / `tag v*` / `workflow_dispatch` 触发，`setup-qemu`+`setup-buildx` 多架构 `linux/amd64,linux/arm64`，`docker/metadata-action` 生成 `latest`（仅 main）+ `sha` + `semver`/`major.minor`，`gha` 缓存，`npm ci`+`npm test` 门禁，推送至 `${DOCKERHUB_USERNAME}/crawler`（需配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` secrets）。
 
 6. **多站点：配置对象 + 策略钩子（2026-08-20 修订，2026-08-21 增 `proxy`）**
    - `sites/yfbzb.js` 实站（`linkPrefix`，`axios`）、`sites/ceb.js` 实站（`axios` + easy_proxies 代理换 IP，`buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize:1`/`requestDelay`/`headers`/`proxy`/`fallbackOn405`）、`sites/index.js` 注册表（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。新增站点只需加配置对象（`sites/<site>.js`）并在 `SITES` 中列出；`proxy` 使 `ceb` 等固定 IP 被 WAF 拦的站点可独立换 IP，而不影响直连站点。
@@ -39,13 +39,13 @@
 - **变更**: `SITES` 逗号分隔 + `CRON_<SITE>`/`TOTAL_PAGES_<SITE>`/`SITES_CONFIG` 每站覆盖；`index.js` 每站 `scheduleLoopForSite` 并发（`Promise.all`）；`crawler.js` 委托 `sites/<site>.js` 策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`，默认内联于 `crawler.js`）；`log.js` 要求 `log(msg,{site})` 显式传 `site` 以避免 `currentSite` 并发竞态；`report.js` `generateAllReports` 改 `Promise.all`；`docker-compose.yml` 单服务 `crawler` 替代一服务一站点。
 - **兼容**: `SITE` 单站点、`CRON_EXPR` 全局、`crawl({site})` 旧签名均保留；`yfbzb` 现有行为不变。
 
-## 修订 2026-08-20 — 总导航与静态服务（含进阶探针）
+## 修订 2026-08-20 — 总导航与静态服务（含轻量存活探针）
 
 - **背景**: 用户要求“导航页，显示 yfbzb 和 ceb 的入口”且“通过域名访问”，需在不引入前端构建的前提下提供可被外部反代的入口页。
 - **变更**:
   - `sites/yfbzb.js`/`sites/ceb.js` 新增 `displayName`/`description`/`originUrl` 供导航卡片展示；
   - `report.js` 新增 `collectSiteStats(site)`/`buildNavHtml(sitesData)`/`generateNav(sites)`（动态发现 `parseSitesList()`，`yfbzb`/`ceb` 置顶，缺失站点报告自动补空占位，`NAV_CSS`+`COMMON_CSS` 自适应，`file/index.html`+`file/tokens.css`）与 `generateAllReports(sites)` 末尾刷新导航，每站 `runOnce` 内 `crawl → generateReport → generateNav`；
-  - 新增 `server.js`（零依赖 `http`，`createServer`/`startServer`/`buildHealthPayload`，托管 `file/` 于 `HTTP_PORT` 默认 8080，`EXPOSE 8080`，路由 `/`→总导航、`/<site>/`→站点报告、`safeJoin` 防穿越、`HEAD` 支持，`GET /health|/healthz|/api/health` 进阶探针 `no-store` 返回 `{status,timestamp,uptime,navExists,navGeneratedAt,totals,sites[]}`）；
+  - 新增 `server.js`（零依赖 `http`，`createServer`/`startServer`/`buildHealthPayload`，托管 `file/` 于 `HTTP_PORT` 默认 8080，`EXPOSE 8080`，路由 `/`→总导航、`/<site>/`→站点报告、`safeJoin` 防穿越、`HEAD` 支持，`GET /health|/healthz|/api/health` 轻量存活探针 `no-store` 返回 `{status,timestamp,uptime,navExists,navGeneratedAt,totals:{sites:0,dates:0,records:0},sites:[]}`，不扫描 xlsx）；
   - `index.js` 启动时 `startServer()`+`generateNav(env.sites)` 预生成并在 `SIGINT`/`SIGTERM` 时关闭 HTTP 服务；
   - `Dockerfile` 加 `EXPOSE 8080`，`docker-compose.yml` 加 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` + `healthcheck`（`node require('http').get(.../health)`，`interval 30s`）与 `HTTP_PORT`/`HTTP_ENABLED` env，`.env.example` 同步；
   - 意图由外部反代承载 `80/443` 与 HTTPS，本容器仅暴露 `8080`，域名 `your.domain.com/`→总导航、`/<site>/`→报告、`/health`→探针。
@@ -60,7 +60,7 @@
   - 当时的代理 sidecar 配置为实验性方案；该配置模型已在 2026-08-28 迁移中废弃，当前配置契约见下方 easy_proxies multi-port 修订，不再使用旧的 `mixed-port`/代理组字段；
   - `package.json` 改为 `http-proxy-agent`/`https-proxy-agent`，文档全量脱敏（`xxx.xxx.xxx.xxx` 占位）。
 - **权衡**: 镜像回到轻量、无 `chromium` 体积/内存负担；换 IP 才是对 IP 段封禁的根治，代理仅 `ceb` 按需启用，不影响 `yfbzb` 直连。
-- **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；当时已有测试通过，当前完整回归以 2026-08-28 修订中的 8 套件结果为准。
+- **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；当时已有测试通过，当前完整回归以 2026-09-07 的 9 套件结果为准。
 
 ## 修订 2026-08-28 — 迁移到 easy_proxies multi-port
 
@@ -76,7 +76,7 @@
 
 ## 后果
 
-- 正面：换机器/重装可通过 `docker compose up -d` 常驻、`ghcr.io` 拉取、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。
+- 正面：换机器/重装可通过 `docker compose up -d` 常驻、从 Docker Hub 拉取 crawler 镜像、宿主机 `file/`/`logs/` 可审计；新站点接入成本为“一配置对象（`sites/<site>.js` 策略） + `SITES` 加名”，无需新增 compose 服务；各站可独立定制抓取/解析/边界与定时。
 - 负面/权衡：`nextCronDelay` 仅支持 `m h * * *`，复杂 cron 需另引依赖；多架构构建在 x86 runner 上 QEMU 较慢（需要时可先单架构）；一容器内 `N*batchSize` 并发可能对目标站限流敏感，可通过站点 `batchSize` 自降并发或后续加站间错峰/全局限流。
 
 ## 备选方案（已否决）
@@ -87,7 +87,7 @@
 
 ## 验证
 
-- `npm test` / `node test/run.js` 当前 8 套件全绿（`withTempCwd` 按 `file/<site>/`/`logs/<site>/`/`state-<site>.json` 隔离）。
+- `npm test` / `node test/run.js` 当前 9 套件全绿（`withTempCwd` 按 `file/<site>/`/`logs/<site>/`/`state-<site>.json` 隔离）。
 - `SITE=<未知>` 单站点启动即 `getSiteConfig` 抛错、exit 1，不落脏文件；`SITES=yfbzb,<未知>` 多站点下未知站点 warn 跳过、`yfbzb` 正常运行（对应 `file/<site>/`/`logs/<site>/` 不创建）。
 - 策略钩子：`buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize`/`linkPrefix` 均有单测/冒烟覆盖；`SITES=yfbzb,ceb` 并发冒烟 `file/yfbzb/` 与 `file/ceb/`、`logs/yfbzb/` 与 `logs/ceb/` 隔离且 `site` 前缀正确。
 - 每站独立定时：`CRON_YFBZB`/`CRON_CEB`/`SITES_CONFIG` 解析与 `nextCronDelay` 逐站校验。

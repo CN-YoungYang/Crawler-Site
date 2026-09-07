@@ -702,6 +702,7 @@ async function crawl(a, b, c, d) {
     currentPage = 1;
     existingIds = readRecentIds(site);
   }
+  const runStartPage = currentPage;
 
   let shouldStopCrawling = false;
   let stoppedBySignal = false;
@@ -717,12 +718,14 @@ async function crawl(a, b, c, d) {
   let netFailSwitched = false;
   // 第一页探针轮尽：所有代理节点均失败，判定出口不可用，取消本次抓取
   let gateAborted = false;
+  let retryFromPage = null;
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
   // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置
   let realTotalPagesObserved;
   let effectiveTotalPages = totalPages;
 
   while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
+    const batchStartPage = currentPage;
     if (stopping) {
       stoppedBySignal = true;
       break;
@@ -731,17 +734,18 @@ async function crawl(a, b, c, d) {
     const crawlPromises = [];
 
     for (let i = 0; i < pagesToCrawl; i++) {
-      crawlPromises.push(crawlPage(currentPage + i, siteConfig, existingIds, maxRetries));
+      crawlPromises.push(crawlPage(batchStartPage + i, siteConfig, existingIds, maxRetries));
     }
 
     const results = await Promise.all(crawlPromises);
+    if (stopping) stoppedBySignal = true;
     let hasNewDataInBatch = false;
     let failedCount = 0;
     let batchEndReached = false;
 
     for (let i = 0; i < results.length; i++) {
       const { pageData, failed, endReached: ended, status } = results[i];
-      const pageNo = currentPage + i;
+      const pageNo = batchStartPage + i;
 
       if (failed) {
         failedCount++;
@@ -751,6 +755,7 @@ async function crawl(a, b, c, d) {
           gateAborted = true;
           log(`第一页在所有代理节点上均失败，判定出口全部不可用，取消本次抓取 [${site}]`, { level: 'error', event: 'first_page_gate_abort', context: { site, page: pageNo }, site });
           shouldStopCrawling = true;
+          retryFromPage = batchStartPage;
           continue;
         }
         // 405 连击：换点成功即清零（给新出口一个完整请求的观察窗，避免未验证先熔断），否则累计
@@ -801,7 +806,7 @@ async function crawl(a, b, c, d) {
       log(`第 ${pageNo} 页爬取完成，${pageNew ? '有' : '没有'}新数据`, { event: 'page_done', context: { page: pageNo, newCount: pageNew, site }, site });
     }
 
-    currentPage += pagesToCrawl;
+    currentPage = batchStartPage + pagesToCrawl;
 
     // 站点自报真实总页数合并：后观测覆盖前观测，每批重算有效上限；
     // 收窄到低于当前页时由循环条件自然退出（等价于「已到底」）
@@ -821,6 +826,7 @@ async function crawl(a, b, c, d) {
     if (consecutive405 >= 2) {
       log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
+      retryFromPage = batchStartPage;
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
       // 网络连败换 IP：仅配置了可切换 provider 的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
@@ -832,6 +838,7 @@ async function crawl(a, b, c, d) {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
       log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
+      retryFromPage = batchStartPage;
     } else if (batchEndReached) {
       endReached = true;
       shouldStopCrawling = true;
@@ -854,7 +861,10 @@ async function crawl(a, b, c, d) {
 
     if (!shouldStopCrawling) {
       const ok = await sleepInterruptible(interval);
-      if (!ok || stopping) shouldStopCrawling = true;
+      if (!ok || stopping) {
+        stoppedBySignal = true;
+        shouldStopCrawling = true;
+      }
     }
   }
 
@@ -927,12 +937,15 @@ async function crawl(a, b, c, d) {
     for (const id of failedIds) existingIds.delete(id);
   }
 
-  if (stoppedBySignal) {
-    saveCheckpoint(site, currentPage, existingIds);
-    log(`已优雅退出，checkpoint 已保存（起始页 ${currentPage}），下次将续跑`, { level: 'warn', event: 'graceful_exit', context: { currentPage, site }, site });
-  } else if (fileWriteFailed > 0) {
-    saveCheckpoint(site, currentPage, existingIds);
-    log(`部分文件落盘失败 ${fileWriteFailed} 个日期（成功 ${fileWriteSucceeded} 个），已保留 checkpoint（起始页 ${currentPage}）待下次重试，未落盘数据不计入去重`, { level: 'error', event: 'checkpoint_retained_on_file_error', context: { site, fileWriteFailed, fileWriteSucceeded, currentPage, failedIds: failedIds.size }, site });
+  if (stopping) stoppedBySignal = true;
+  const checkpointPage = fileWriteFailed > 0 ? runStartPage : (retryFromPage ?? currentPage);
+  if (stoppedBySignal || retryFromPage !== null || fileWriteFailed > 0) {
+    saveCheckpoint(site, checkpointPage, existingIds);
+    const checkpointLevel = fileWriteFailed > 0 ? 'error' : 'warn';
+    const checkpointEvent = fileWriteFailed > 0
+      ? 'checkpoint_retained_on_file_error'
+      : stoppedBySignal ? 'graceful_exit' : 'checkpoint_retained';
+    log(`已保留 checkpoint（起始页 ${checkpointPage}），下次将续跑`, { level: checkpointLevel, event: checkpointEvent, context: { currentPage: checkpointPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage }, site });
   } else {
     clearCheckpoint(site);
   }
