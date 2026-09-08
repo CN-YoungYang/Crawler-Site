@@ -43,7 +43,7 @@ ctbpsp.com 的 `necaptcha-validate` 票据（网易易盾）**纯协议无法自
 
 - [x] 归档 ctbpsp 实现 → `jsreverse-yidun/ctbpsp-implementation/`
 - [x] 从备份/HEAD 恢复 `sites/ceb.js`、`crawler.js`、`.gitignore` 的旧源路径（三文件回退）
-- [x] 当时旧源回归通过；当前包含 easy_proxies 适配器的完整 `npm test` 为 8/8 套件通过
+- [x] 当时旧源回归通过；当前包含 easy_proxies 适配器的完整 `npm test` 为 9/9 套件通过
 - [x] 清理临时产物（solve_*.js / fetch_*.js / acw.html / ctbpsp_app.js 等 20 个文件）
 - [x] 保留 `docs/progress-ceb-ctbpsp.md`（本文件，记录最终结论）
 

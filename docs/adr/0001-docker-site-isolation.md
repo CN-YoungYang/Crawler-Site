@@ -12,7 +12,7 @@
    - 理由：Alpine `crond`/`supercronic` 需额外包、信号/日志/时区坑多；Node 侧零依赖即可满足 `0 2 * * *` 场景，且与既有 `SIGINT`/`SIGTERM` 优雅退出（`isStopping()`）天然衔接，`docker stop` 可被 1s 中断。
 
 2. **参数：环境变量优先、位置参数回退（支持多站点）**
-   - `parseEnv()` 合并 `SITES`（逗号分隔，`SITES=yfbzb,ceb`）/`SITE`/`CRAWLER_SITE`、`TOTAL_PAGES`/`PAGES`、`INTERVAL_MS`/`INTERVAL`、`MIN_DELAY_S`/`MIN_DELAY`、`MAX_DELAY_S`/`MAX_DELAY`、`CRON_EXPR`/`CRON`，未设回退到 `parseArguments()`；每站独立覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`CRON_EXPR_<SITE>`，或 `SITES_CONFIG` JSON（`{"yfbzb":{"cron":"0 2 * * *"}}`），优先级：每站 env > JSON > 全局 env > argv。`parseSitesList()`/`normalizeSites()` 负责解析与去重。
+   - `parseEnv()` 合并 `SITES`（逗号分隔，`SITES=yfbzb,ceb`）/`SITE`/`CRAWLER_SITE`、`TOTAL_PAGES`/`PAGES`、`INTERVAL_MS`/`INTERVAL`、`MIN_DELAY_S`/`MIN_DELAY`、`MAX_DELAY_S`/`MAX_DELAY`、`CRON_EXPR`/`CRON`，未设回退到 `parseArguments()`；每站独立覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`，或 `SITES_CONFIG` JSON（`{"yfbzb":{"cron":"0 2 * * *"}}`），优先级：每站 env > JSON > 全局 env > argv。`parseSitesList()`/`normalizeSites()` 负责解析与去重。
    - `validateInput` 逐站 `getSiteConfig(site)` 校验站点、以 `nextCronDelay(cronExpr)` 校验每站 cron；`SITES` 多值下占位/未知站点 warn 跳过（保留有效站点继续运行），单站点下仍 fail-fast；`require.main===module` 守卫避免 `require` 时自启动。
 
 3. **持久化：bind mount > named volume（多站点共享）**
@@ -36,7 +36,7 @@
 ## 修订 2026-08-20 — 一容器多站点并发与策略化
 
 - **背景**: 用户要求一容器爬多个站点且每站逻辑不同、每站独立定时、容器内并发；先做扩展位（钩子打通，不一次性实现所有重逻辑）。
-- **变更**: `SITES` 逗号分隔 + `CRON_<SITE>`/`TOTAL_PAGES_<SITE>`/`SITES_CONFIG` 每站覆盖；`index.js` 每站 `scheduleLoopForSite` 并发（`Promise.all`）；`crawler.js` 委托 `sites/<site>.js` 策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`，默认内联于 `crawler.js`）；`log.js` 要求 `log(msg,{site})` 显式传 `site` 以避免 `currentSite` 并发竞态；`report.js` `generateAllReports` 改 `Promise.all`；`docker-compose.yml` 单服务 `crawler` 替代一服务一站点。
+- **变更**: `SITES` 逗号分隔 + `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` 每站覆盖；`index.js` 每站 `scheduleLoopForSite` 并发（`Promise.all`）；`crawler.js` 委托 `sites/<site>.js` 策略（`buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`batchSize`/`failureThreshold`/`timeout`/`headers`，默认内联于 `crawler.js`）；`log.js` 要求 `log(msg,{site})` 显式传 `site` 以避免 `currentSite` 并发竞态；`report.js` `generateAllReports` 改 `Promise.all`；`docker-compose.yml` 单服务 `crawler` 替代一服务一站点。
 - **兼容**: `SITE` 单站点、`CRON_EXPR` 全局、`crawl({site})` 旧签名均保留；`yfbzb` 现有行为不变。
 
 ## 修订 2026-08-20 — 总导航与静态服务（含轻量存活探针）
@@ -60,7 +60,7 @@
   - 当时的代理 sidecar 配置为实验性方案；该配置模型已在 2026-08-28 迁移中废弃，当前配置契约见下方 easy_proxies multi-port 修订，不再使用旧的 `mixed-port`/代理组字段；
   - `package.json` 改为 `http-proxy-agent`/`https-proxy-agent`，文档全量脱敏（`xxx.xxx.xxx.xxx` 占位）。
 - **权衡**: 镜像回到轻量、无 `chromium` 体积/内存负担；换 IP 才是对 IP 段封禁的根治，代理仅 `ceb` 按需启用，不影响 `yfbzb` 直连。
-- **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；当时已有测试通过，当前完整回归以 2026-09-07 的 9 套件结果为准。
+- **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；当时已有测试通过，最近一次完整回归（2026-09-08）为 9 个测试套件全部通过。
 
 ## 修订 2026-08-28 — 迁移到 easy_proxies multi-port
 

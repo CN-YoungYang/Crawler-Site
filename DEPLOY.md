@@ -158,7 +158,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-当前 Compose 对 crawler 同时声明了 `build` 和 `image`：部署时以本地 `Dockerfile` 构建为准，产出的本地镜像标签是 `rxyoungyang/crawler:latest`。
+当前 Compose 对 crawler 同时声明了 `build` 和 `image`：执行 `docker compose up -d --build` 时以本地 `Dockerfile` 构建为准，并按 Compose 的 `image` 字段标记为 `rxyoungyang/crawler:latest`；CI 发布地址由 `DOCKERHUB_USERNAME` secret 决定，如用户名不同需同步修改 `docker-compose.yml` 的 `image`。
 
 查看启动日志：
 
