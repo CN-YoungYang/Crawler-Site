@@ -1,4 +1,4 @@
-// Seam: crawlPage 405 降级 / 双 405 快败 / 网络级连败与 easy_proxies 第一页探针。
+// 边界：crawlPage 405 降级 / 双 405 快败 / 网络级连败与 easy_proxies 第一页探针。
 // (a) 末次重试遇 GET 405 → 必须真正发出 POST 并返回结果对象，绝不隐式 undefined
 // (b) GET 405 → POST 仍 405 → 双 405 快败 failed:true status:405（不空转重试）
 // (c) 连续无 status 失败（ECONNRESET/超时）达熔断阈值 → crawl 提前结束，不再爬满 totalPages
@@ -103,7 +103,7 @@ async function mainBase() {
   } finally {
     Math.random = previousRandom;
   }
-  console.log('crawlPage 405 降级/双 405 快败/网络连败熔断: OK');
+  console.log('crawlPage 405 降级/双 405 快败/网络连败熔断：通过');
 }
 
 const EASY_NODES = [
@@ -224,7 +224,7 @@ async function mainGate() {
   } finally {
     Math.random = previousRandom;
   }
-  console.log('easy_proxies 第一页探针（端口轮换/轮尽取消抓取）: OK');
+  console.log('easy_proxies 第一页探针（端口轮换/轮尽取消抓取）：通过');
 }
 
 async function main() {
@@ -233,6 +233,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error('FAIL', error.stack || error.message);
+  console.error('失败', error.stack || error.message);
   process.exit(1);
 });

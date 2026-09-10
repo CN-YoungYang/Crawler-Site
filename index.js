@@ -136,7 +136,7 @@ function validateInput(input) {
         nextCronDelay(cron);
       } catch (e) {
         console.error(`站点 [${site}] CRON 无效: ${e.message}（例如 "0 2 * * *" 每天02:00，"10,40 * * * *" 每小时10/40分）`);
-        // 任何来源的非法 cron 均需 fail-fast（包括 SITES_CONFIG），避免静默放行后运行时崩溃
+        // 任何来源的非法 cron 均需快速失败（包括 SITES_CONFIG），避免静默放行后运行时崩溃
         if (cron === globalCron) {
           console.error(`CRON_EXPR 无效: ${e.message}（例如 "0 2 * * *" 每天02:00，"10,40 * * * *" 每小时10/40分）`);
         }

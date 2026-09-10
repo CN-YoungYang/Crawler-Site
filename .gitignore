@@ -4,7 +4,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# 运行时产出（bind mount 持久化目录，按站点隔离）
+# 运行时产出（绑定挂载的持久化目录，按站点隔离）
 file/
 logs/
 state*.json

@@ -17,12 +17,12 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
 - 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
 - 双通道日志：控制台中文（`[site]` 前缀，`docker logs` 可区分）+ 结构化 JSONL，按站点按日分割 `logs/<site>/crawler-YYYY-MM-DD.jsonl`、30 天保留，`pruneOldLogs(site)` 与报告同窗口清理
-- Docker 常驻：一容器并发多站点（`SITES=yfbzb,ceb`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，bind mount 持久化 `file/`/`logs/`
+- Docker 常驻：一容器并发多站点（`SITES=yfbzb,ceb`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，通过绑定挂载持久化 `file/`/`logs/`
 
 ## 环境要求
 
 - Node.js（建议 18+）；容器运行需 Docker / Docker Compose
-- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`http-proxy-agent`/`https-proxy-agent`（全站 `axios` 静态抓取，`ceb` 默认经 Compose 的 `easy_proxies` multi-port 代理换 IP）
+- 依赖已在 `package.json` 声明：`axios`、`cheerio`、`xlsx`、`http-proxy-agent`/`https-proxy-agent`（全站 `axios` 静态抓取，`ceb` 默认经 Compose 的 `easy_proxies` 多端口代理换 IP）
 
 安装依赖：
 
@@ -61,7 +61,7 @@ node index.js
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb,ceb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,ceb`；`SITE` 单站点兼容；未在 `sites/index.js` 注册的站点在多站点模式下 warn 跳过、单站点下 fail-fast |
+| `SITES` / `SITE` / `CRAWLER_SITE` | `yfbzb,ceb` | 站点列表，逗号分隔，容器内并发，如 `SITES=yfbzb,ceb`；`SITE` 单站点兼容；未在 `sites/index.js` 注册的站点在多站点模式下警告后跳过，单站点下快速失败 |
 | `TOTAL_PAGES` / `PAGES` | 100 | 同位置参数 1（硬上限；站点分页自报真实总页数更小时自动提前停止）；支持每站覆盖 `TOTAL_PAGES_<SITE>`（如 `TOTAL_PAGES_CEB=50`） |
 | `INTERVAL_MS` / `INTERVAL` | 5000 | 同位置参数 2；支持每站覆盖 `INTERVAL_MS_<SITE>` |
 | `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
@@ -93,7 +93,7 @@ cp easy_proxies/config.yaml.example easy_proxies/config.yaml
 # 编辑 easy_proxies/config.yaml，填写 subscriptions，或准备 nodes.txt
 ```
 
-配置字段和管理 API 以 [easy_proxies 官方 README](https://github.com/jasonwong1991/easy_proxies) 与[官方配置示例](https://github.com/jasonwong1991/easy_proxies/blob/main/config.example.yaml)为准。Compose 默认只在内部网络暴露管理端口 `9091` 和 multi-port 业务端口 `24000-24200`；需要宿主机直接访问时再在 `docker-compose.yml` 中显式取消 `ports` 注释。
+配置字段和管理 API 以 [easy_proxies 官方 README](https://github.com/jasonwong1991/easy_proxies) 与[官方配置示例](https://github.com/jasonwong1991/easy_proxies/blob/main/config.example.yaml)为准。Compose 默认只在内部网络暴露管理端口 `9091` 和 多端口业务端口 `24000-24200`；需要宿主机直接访问时再在 `docker-compose.yml` 中显式取消 `ports` 注释。
 
 ```bash
 docker build -t crawler:local .
@@ -103,7 +103,7 @@ curl http://127.0.0.1:8080/health | jq  # 轻量存活探针
 docker compose down
 ```
 
-`docker-compose.yml` 为双服务 `easy_proxies`（默认启用，multi-port 节点端口从 `24000` 开始，管理 API 为 `9091`）+ `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
+`docker-compose.yml` 为双服务 `easy_proxies`（默认启用，多端口节点端口从 `24000` 开始，管理 API 为 `9091`）+ `crawler`，通过 `SITES=yfbzb,ceb` 一容器并发多站点，每站独立 `CRON_<SITE>` 与逻辑（`sites/<site>.js` 策略）。数据、日志与静态服务通过以下配置：
 
 ```yaml
 services:
@@ -129,7 +129,7 @@ services:
       interval: 30s
 ```
 
-崩溃续跑如需保留 checkpoint，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-ceb.json:/app/state-ceb.json`。
+崩溃续跑如需保留断点，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-ceb.json:/app/state-ceb.json`。
 
 **域名暴露**（推荐由外部反代承载 80/443 与 HTTPS，本容器仅暴露 8080）：
 
@@ -154,18 +154,18 @@ server {
   ```
 
 - **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 轻量存活探针、`GET /<site>/<date>.xlsx` → 下载。
-- **Checkpoint**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
+- **断点续跑**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
 
 ## 工作原理
 
 整体数据流（`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js` → `server.js`）：
 
-1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点 warn 跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
+1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点警告后跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies multi-port 代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
@@ -210,31 +210,31 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies multi-port 换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；Agent 隧道按站隔离），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies 多端口换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；代理隧道按站隔离），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 
 ```
 crawler/
 ├── index.js              # 入口：环境变量/参数解析、校验、静态服务拉起、调度（CRON/单次常驻，每批后刷新导航）
-├── crawler.js            # 爬取核心：crawl() 编排（含真实总页数收窄上限）+ crawlPage() 逐页抓取 + checkpoint（按站点）
+├── crawler.js            # 爬取核心：crawl() 编排（含真实总页数收窄上限）+ crawlPage() 逐页抓取 + 断点（按站点）
 ├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
 ├── report.js             # 报告：scanFiles/generateReport 按站点生成 HTML，generateNav/buildNavHtml 生成总导航 file/index.html
 ├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 轻量存活探针
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/parseSitesList()/listEnabledSites()（仅 yfbzb/ceb）
-│   ├── _easy_proxies.js  # 默认 provider：管理 API、健康节点发现、multi-port 轮换与订阅刷新
+│   ├── _easy_proxies.js  # 默认代理提供方：管理 API、健康节点发现、多端口轮换与订阅刷新
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 9 个零依赖 Node 测试套件与 fixtures
+├── test/                 # 9 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
-├── docker-compose.yml    # 双服务 easy_proxies(默认启用，multi-port 24000+，管理 API 9091) + crawler 一容器多站点并发编排
+├── docker-compose.yml    # 双服务 easy_proxies(默认启用，多端口业务端口 24000+，管理 API 9091) + crawler 一容器多站点并发编排
 ├── DEPLOY.md             # Docker Compose 部署、验证、更新与故障排查手册
 ├── .dockerignore
 ├── easy_proxies/
-│   └── config.yaml.example  # multi-port 代理池与管理 API 示例
+│   └── config.yaml.example  # 多端口代理池与管理 API 示例
 ├── .github/workflows/docker-build.yml  # Docker Hub 构建推送（npm test 门禁，多架构）
 ├── CONTEXT.md            # 领域术语与边界（单上下文通用语言）
 ├── docs/
@@ -242,9 +242,9 @@ crawler/
 │   ├── adr/0002-ceb-keep-legacy-source.md # ceb 旧源与 ctbpsp 切换结论
 │   ├── progress-ceb-ctbpsp.md              # ctbpsp 迁移终止与归档说明
 │   └── agents/domain.md / issue-tracker.md
-├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（bind mount 持久化，server.js 托管）
-├── logs/                 # 日志：logs/<site>/crawler-YYYY-MM-DD.jsonl（bind mount 持久化）
-├── state-<site>.json     # 按站点 checkpoint（每批写入，正常完成即删）
+├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（绑定挂载持久化，server.js 托管）
+├── logs/                 # 日志：logs/<site>/crawler-YYYY-MM-DD.jsonl（绑定挂载持久化）
+├── state-<site>.json     # 按站点 断点（每批写入，正常完成即删）
 ├── package.json
 ├── CLAUDE.md             # 给 AI 助手的代码库指引
 ├── AGENTS.md             # 贡献者指南
@@ -256,7 +256,7 @@ crawler/
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
-- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 multi-port 换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
+- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 多端口换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶），缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
-- 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会 warn 跳过，单站点 `SITE=<未知>` 则 fail-fast。
-- agent 工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。
+- 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会警告后跳过，单站点 `SITE=<未知>` 则快速失败。
+- 智能体工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

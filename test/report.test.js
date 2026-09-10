@@ -1,4 +1,4 @@
-// Seam: HTML 报告生成边界
+// 边界：HTML 报告生成
 // 行为：(1) file/<site>/ 不存在 → 创建目录 + 生成含"暂无数据"的 index.html；
 //      (2) 损坏 xlsx → 跳过该文件、其余正常生成、log 警告；
 //      (3) 按日期分片：index.html 轻量（仅日期/记录数/链接 + 跨日期最新 N 条预览），明细落 <date>.html。
@@ -28,7 +28,7 @@ async function main() {
     assert.ok(html.includes("document.getElementById('latest-section').hidden = true"), '空目录应隐藏最新公告预览');
     assert.ok(!html.includes('正常标题'), '索引页不应内联明细数据');
     assert.ok(html.includes('href="tokens.css"'), '报告页应加载共享设计 token');
-    assert.ok(tokens.includes('Taste Skill: Clean Utility & High-Density Data'), 'token 文件应记录 Taste Skill 设计');
+    assert.ok(tokens.includes('设计规范：简洁实用与高密度数据'), 'token 文件应记录中文设计规范');
     assert.ok(tokens.includes('--bg'), 'token 文件应定义背景色');
     assert.strictEqual(LATEST_PREVIEW_COUNT, 10, '最新公告预览默认 10 条');
   });
@@ -89,7 +89,7 @@ async function main() {
     assert.ok(!detailHtml.includes("'publishTime'"), '明细页渲染逻辑不应引用 publishTime');
   });
 
-  console.log('HTML 报告生成: OK');
+  console.log('HTML 报告生成：通过');
 }
 
-main().catch(e => { console.error('FAIL', e.message); process.exit(1); });
+main().catch(e => { console.error('失败', e.message); process.exit(1); });

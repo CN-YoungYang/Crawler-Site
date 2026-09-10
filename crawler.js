@@ -160,10 +160,10 @@ function getProxyAgents(siteConfig, targetUrl) {
   }
 }
 
-// 双 405/网络连败的秒级换 IP：通过 easy_proxies 控制面切换 multi-port 节点，
+// 双 405/网络连败的秒级换 IP：通过 easy_proxies 控制面切换多端口节点，
 // 也可经 siteConfig.switchProxy 按站覆盖；easy_proxies 知识收敛于 sites/_easy_proxies.js。
 // 轮换语义：池中节点按管理 API 返回顺序轮换，避免当前端口和已试节点反复打转：
-// - 只切真实节点端口：由 provider 过滤不可用节点并保留每轮已试记录；
+// - 只切真实节点端口：由 代理提供方过滤不可用节点并保留每轮已试记录；
 // - 同一轮（两次成功页之间）不重复已试节点，按列表顺序依次轮换；
 // - 轮尽不再切换并返回 exhausted（事件 proxy_pool_exhausted），由调用方累计失败自然熔断。
 // 返回 {ok, from, to, exhausted}；ok=true 表示本次真的切换了节点。
@@ -175,7 +175,7 @@ function makeSwitchResult(overrides) {
 }
 
 // 同站换点互斥：batchSize>1 时同批多个双 405 页并发进入 trySwitchProxy，
-// get→filter→PUT→push 读改写交错会重复选同一节点、tried 重复记账假性耗尽
+// get→filter→PUT→push 的读改写交错会重复选择同一节点，导致 tried 重复记账并错误地判定轮尽
 // （2026-08-26 审查 #3）。串行化后每页拿到不同的下一个未试节点。
 const _proxySwitchQueue = new Map(); // 轮换键 -> Promise 链尾
 function withProxySwitchLock(key, fn) {
@@ -209,7 +209,7 @@ async function trySwitchProxy(siteConfig, reason) {
     if (typeof out.proxyUrl === 'string' && out.proxyUrl.trim()) {
       siteConfig.runtimeProxyUrl = out.proxyUrl.trim();
     }
-    // provider 返回成功后才记账；缓存节点快照，轮尽后可零请求短路
+    // 代理提供方返回成功后才记账；缓存节点快照，轮尽后可零请求短路
     _proxyRotate.set(key, Array.isArray(out.tried) ? out.tried : []);
     if (!getProxyAgents._leafCache) getProxyAgents._leafCache = new Map();
     getProxyAgents._leafCache.set(key, {
@@ -233,8 +233,8 @@ async function trySwitchProxy(siteConfig, reason) {
   });
 }
 
-// 启动/每轮爬取前刷新代理订阅（easy_proxies 读取订阅并生成 multi-port 节点）。
-// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（provider 内部限频）。
+// 启动/每轮爬取前刷新代理订阅（easy_proxies 读取订阅并生成多端口节点）。
+// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（代理提供方内部限频）。
 async function refreshProxyProviders(site) {
   let siteConfig;
   try { siteConfig = getSiteConfig(site); } catch (_) { return false; }
@@ -449,7 +449,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         triedFallback = true;
         method = 'POST';
         const snippet = formatSnippet(error.response?.data).replace(/\s+/g, ' ').trim();
-        log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || 'empty'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
+        log(`第 ${pageNo} 页 GET 405，自动降级为 POST 重试 [snippet=${snippet.slice(0, 120) || '空'}]`, { level: 'warn', event: 'fallback_post', context: { page: pageNo, status: errStatus, snippet: snippet.slice(0, 120), site: siteName }, site: siteName });
         await new Promise(resolve => setTimeout(resolve, backoffDelay(retries)));
         continue;
       }
@@ -573,7 +573,7 @@ function loadCheckpoint(site) {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
     let cp = Number(raw.currentPage);
     if (!Number.isFinite(cp) || !Number.isInteger(cp) || cp < 1) {
-      log(`checkpoint currentPage 非法 (${String(raw.currentPage)})，已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw.currentPage), site: normalizeSite(site) }, site: normalizeSite(site) });
+      log(`断点 currentPage 非法 (${String(raw.currentPage)})，已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw.currentPage), site: normalizeSite(site) }, site: normalizeSite(site) });
       return null;
     }
     let ids = raw.existingIds;
@@ -584,7 +584,7 @@ function loadCheckpoint(site) {
       existingIds: new Set(ids)
     };
   } catch (error) {
-    log(`checkpoint 读取失败，从头开始：${error.message}`, { level: 'warn', event: 'checkpoint_load_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
+    log(`断点读取失败，从头开始：${error.message}`, { level: 'warn', event: 'checkpoint_load_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
     return null;
   }
 }
@@ -681,7 +681,7 @@ async function crawl(a, b, c, d) {
     }
   } catch (_) {}
   // 每轮爬取前先刷新代理订阅：先刷新保证本轮换点（尤其第一页探针）拿到最新节点；
-  // provider 内部限频，失败不阻塞本轮。
+  // 代理提供方内部限频，失败不阻塞本轮。
   try {
     const _refreshUrl = resolveProxyUrl(siteConfig);
     const _provider = getProxyProvider(siteConfig, _refreshUrl);
@@ -697,7 +697,7 @@ async function crawl(a, b, c, d) {
   if (checkpoint) {
     currentPage = checkpoint.currentPage;
     existingIds = checkpoint.existingIds;
-    log(`从 checkpoint 续跑 [${site}]，起始页 ${currentPage}，已记录 ${existingIds.size} 个 id`, { event: 'checkpoint_resume', context: { site, currentPage, knownIds: existingIds.size }, site });
+    log(`从断点续跑 [${site}]，起始页 ${currentPage}，已记录 ${existingIds.size} 个 id`, { event: 'checkpoint_resume', context: { site, currentPage, knownIds: existingIds.size }, site });
   } else {
     currentPage = 1;
     existingIds = readRecentIds(site);
@@ -828,7 +828,7 @@ async function crawl(a, b, c, d) {
       shouldStopCrawling = true;
       retryFromPage = batchStartPage;
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
-      // 网络连败换 IP：仅配置了可切换 provider 的代理站点生效，直连站为 no-op。
+      // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
       let sw = makeSwitchResult();
       try { sw = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}
@@ -927,12 +927,12 @@ async function crawl(a, b, c, d) {
         const code = e.code || e.errno || 'UNKNOWN';
         fileWriteFailed++;
         for (const item of data) failedIds.add(item.id);
-        log(`写入文件失败 ${fileName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂未落盘，将随 checkpoint 重试`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code, site }, site });
+        log(`写入文件失败 ${fileName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂未落盘，将随断点重试`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code, site }, site });
       }
     }
   }
 
-  // 落盘失败的 id 回滚出 existingIds，避免 checkpoint 将未落盘数据标记为已爬
+  // 落盘失败的 id 回滚出 existingIds，避免断点将未落盘数据标记为已爬
   if (failedIds.size) {
     for (const id of failedIds) existingIds.delete(id);
   }
@@ -945,7 +945,7 @@ async function crawl(a, b, c, d) {
     const checkpointEvent = fileWriteFailed > 0
       ? 'checkpoint_retained_on_file_error'
       : stoppedBySignal ? 'graceful_exit' : 'checkpoint_retained';
-    log(`已保留 checkpoint（起始页 ${checkpointPage}），下次将续跑`, { level: checkpointLevel, event: checkpointEvent, context: { currentPage: checkpointPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage }, site });
+    log(`已保留断点（起始页 ${checkpointPage}），下次将续跑`, { level: checkpointLevel, event: checkpointEvent, context: { currentPage: checkpointPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage }, site });
   } else {
     clearCheckpoint(site);
   }

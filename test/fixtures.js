@@ -1,4 +1,4 @@
-// 一行真实结构（取自 yfbzb 真实列表页第一行），作为 fixture 的独立真相源。
+// 一行真实结构（取自 yfbzb 真实列表页第一行），作为测试夹具的独立真相源。
 // id = 20250930_542694266；第二行是另一条新记录，用于断言多行场景。
 const ROW_KNOWN = `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/20250930_542694266.html">孝感市特殊教育学校2025年09政府采购意向</a></td><td>招标预告</td><td>湖北孝感</td><td>2025/09/30</td></tr>`;
 const ROW_NEW = `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/20250930_999999999.html">某新单位采购意向</a></td><td>招标预告</td><td>湖北武汉</td><td>2025/09/30</td></tr>`;

@@ -205,9 +205,9 @@ function inlineJson(data) {
     .replace(new RegExp(String.fromCharCode(0x2029), 'g'), '\\u2029');
 }
 
-const TOKENS_CSS = `/* Taste Skill: Clean Utility & High-Density Data
- * theme: system-adaptive (light/dark)
- * typography: system sans + mono for data
+const TOKENS_CSS = `/* 设计规范：简洁实用与高密度数据
+ * 主题：随系统适配（浅色/深色）
+ * 字体：系统无衬线字体 + 数据等宽字体
  */
 :root {
   color-scheme: light dark;
@@ -750,7 +750,7 @@ function buildDetailHtml(file) {
     search.focus();
   });
 
-  // Basic sorting logic
+  // 基础排序逻辑
   var originalOrder = Array.from(tbody.children);
   var sortKey = null, sortDir = null;
   var collator = typeof Intl !== 'undefined' && Intl.Collator

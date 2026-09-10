@@ -4,7 +4,7 @@
 > 决策：用户选择「B 回退旧源 bulletin.cebpubservice.com（代理换 IP）」。
 > ctbpsp.com 成果已归档至 `jsreverse-yidun/`（gitignore，不入仓库），将来服务端放松可立即切回。
 
-> **当前实现补充（2026-08-28）**：旧源仍是 `ceb` 的生产数据源；代理控制面已统一为 easy_proxies multi-port。Compose 默认使用 `http://easy_proxies:24000`，管理 API 为 `9091`，适配器与配置见 `sites/_easy_proxies.js`、`easy_proxies/config.yaml.example` 和 `README.md`。
+> **当前实现补充（2026-08-28）**：旧源仍是 `ceb` 的生产数据源；代理控制面已统一为 easy_proxies 多端口。Compose 默认使用 `http://easy_proxies:24000`，管理 API 为 `9091`，适配器与配置见 `sites/_easy_proxies.js`、`easy_proxies/config.yaml.example` 和 `README.md`。
 
 ---
 
@@ -71,5 +71,5 @@ npm test
 - 用户沟通语言：中文；回复中文
 - **ctbpsp 卡点是服务端风控策略，不是技术**：协议已 100% 还原，勿再重复攻坚求解器/沙箱/指纹
 - ctbpsp.com 对美国/代理 IP 全路径 405（连主页都拦），测试需大陆直连（FlClash 规则 `DOMAIN-SUFFIX,ctbpsp.com,DIRECT`）
-- Windows 下无法非交互测 SIGINT/SIGTERM（memory）
+- Windows 下无法非交互测 SIGINT/SIGTERM（记忆记录）
 - 网易易盾协议细节（getconf→/v4/j/up→get→check、fp/cb/dt/data 构造、AES key）全在 `jsreverse-yidun/case/notes/entry-chain.md` 与案例库 `yidun-intellisense-vm-env`

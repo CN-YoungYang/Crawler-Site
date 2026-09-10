@@ -1,98 +1,75 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件是 Claude/Codex 等 AI 助手在本仓库工作的专属指引。修改爬虫行为前，先阅读本文件、`AGENTS.md`、`CONTEXT.md` 和相关 ADR。
 
-## Overview
+## 项目概览
 
-A Node.js web crawler that scrapes public bidding/notice listings from `yfbzb.com` (`invitedBidSearch`) and `ceb` (中国招标公共服务平台·湖北 — `axios` + `easy_proxies` multi-port 代理换 IP，默认业务端口 `24000`、管理 API `9091`，订阅地址不写入日志)，deduplicates them against previously saved data, and writes the results to Excel files partitioned by publish date. Supports multiple sites in one container, each with independent scheduling and pluggable parsing logic via `sites/<site>.js` strategy hooks（全站 `axios`，代理按需）。Built-in lightweight static server hosts `file/` (`file/index.html` total navigation + `file/<site>/` per-site reports) on `HTTP_PORT` (default 8080, `EXPOSE 8080`, `healthcheck` on `/health`), intended to be fronted by an external reverse proxy for domain access.
+这是一个 Node.js 招标公告爬虫，抓取 `yfbzb.com` 的 `invitedBidSearch` 列表和 `ceb`（中国招标投标公共服务平台·湖北），按公告 `id` 去重后按发布日期写入 Excel。项目支持一个容器并发运行多个站点，每个站点具有独立调度、解析策略、日志、报告和断点文件。
 
-## Commands
+`server.js` 提供零依赖静态服务，托管 `file/` 下的总导航与站点报告，默认监听 `HTTP_PORT=8080`。`/health` 是轻量存活探针，供反向代理、监控和 Compose 的 `healthcheck`（健康检查）使用。`ceb` 在固定出口被 WAF 拦截时通过 easy_proxies 多端口代理换 IP；订阅地址、密码和节点 IP 不得写入日志或提交仓库。
+
+## 常用命令
 
 ```bash
-# 本地（宿主机）
-node index.js [页数] [间隔时间(毫秒)] [最小延迟(秒)] [最大延迟(秒)]
-# Defaults: 100 pages, 5000ms interval, 0s min delay, 300s max delay
-# Example: node index.js 100 5000 0 300
+# 本地运行：页数、批次间隔毫秒、启动前最小/最大随机延迟秒数
+node index.js [页数] [间隔毫秒] [最小延迟秒] [最大延迟秒]
+node index.js 100 5000 0 300
 
-# 环境变量（容器推荐，优先级高于位置参数）
-SITES=yfbzb,ceb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
-# SITES 逗号分隔，一容器并发爬多站点；兼容单站点 SITE=yfbzb
-# 每站独立覆盖：CRON_YFBZB="0 2 * * *" CRON_CEB="0 3 * * *" TOTAL_PAGES_CEB=50
-# 或 JSON：SITES_CONFIG='{"yfbzb":{"totalPages":100,"cron":"0 2 * * *"}}'
-# CRON_EXPR 为空 → 单次运行后常驻；设为 "m h * * *"（如 "0 2 * * *"）→ Node 内置定时每日触发（支持每站独立 CRON_<SITE>）
-# 静态服务：HTTP_PORT=8080 HTTP_ENABLED=true（托管 file/，根 / 为总导航，/health 为探针，EXPOSE 8080，compose healthcheck 已配）
+# 容器推荐配置
+SITES=yfbzb,ceb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR='0 2 * * *' node index.js
+
+# 测试
+npm test
+node test/run.js
 
 # Docker
 docker build -t crawler:local .
 docker compose up -d --build
 docker compose logs -f crawler
-curl http://127.0.0.1:8080/health | jq  # 轻量存活探针：status/uptime/navExists/navGeneratedAt
-
-# Docker Hub（由 .github/workflows/docker-build.yml 自动推送：push main / tag v* / workflow_dispatch）
-# 镜像：${DOCKERHUB_USERNAME}/crawler:latest + sha + semver，npm test 门禁，gha 缓存，多架构 amd64/arm64
+curl http://127.0.0.1:8080/health | jq
+docker compose down
 ```
 
-There is no build, formatter, or lint step. Run the crawler directly with `node index.js`. The reporting helpers live in `report.js` and the static server in `server.js`. Docker artifacts: `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.github/workflows/docker-build.yml`.
+环境变量优先于位置参数。`SITES` 为逗号分隔的站点列表，`SITE`/`CRAWLER_SITE` 保留单站点兼容；每站可使用 `TOTAL_PAGES_<SITE>`、`INTERVAL_MS_<SITE>`、`MIN_DELAY_S_<SITE>`、`MAX_DELAY_S_<SITE>`、`CRON_<SITE>` 覆盖全局值，也可以使用 `SITES_CONFIG` JSON。`CRON_EXPR` 为空时单次运行后常驻；只支持 `m h * * *` 格式时按日调度。
 
-Tests: zero-dependency `node:test`-style suites under `test/*.test.js` (plain `assert`, no runner installed; currently 9 suites). They mock `axios` via `require.cache` (see `test/helper.js` — `crawler.js` and `sites/_easy_proxies.js` require axios at module top, so each test calls `freshCrawler()` to re-capture the mock), and `withTempCwd()` to keep `crawl()` writes isolated. `test/easy_proxies.test.js` covers the `/api/nodes` contract, optional auth, refresh cooldown, empty/API-down degradation, and port rotation; rotation tests inject `sites/index.js#registry.cebtest`, `PROXY_CEBTEST=http://easy_proxies:24000`, and `EASY_PROXIES_CONTROLLER=http://controller.test:9091`. Mock 内 **必须先 `mockAxios` 再 `freshCrawler`**，顺序颠倒会捕获真实 axios。Run all suites with `node test/run.js` or `npm test`.
+## 架构与数据流
 
-## Architecture
+数据流为：`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js` → `server.js`。
 
-Site-aware (index + crawler + log + report + sites registry), data flow is linear:
+1. **`index.js`**：解析并校验环境变量，验证 `getSiteConfig()` 和 `nextCronDelay()`，启动静态服务，预生成 `file/index.html`，刷新 easy_proxies 订阅，并为每个站点启动 `scheduleLoopForSite`。站点调度通过 `Promise.all` 并发；每轮执行 `crawl()` → `generateReport(site)` → `generateNav()`。收到 `SIGINT`/`SIGTERM` 时停止新批次并关闭 HTTP 服务。
+2. **`crawler.js`**：按站点批次并发抓取。默认 `BATCH_SIZE=10`，`ceb` 使用 `batchSize:1` 和 `requestDelay` 串行限速。导出 `crawl()`、`crawlPage()`、`backoffDelay()`、`readRecentIds()`、`fileDir()`、`stateFile()`、`isStopping()` 和 `refreshProxyProviders()`。
+3. **`log.js`**：同时写中文控制台日志和按站点、按日期划分的 JSONL 日志。并发调用 `log(msg, { site })` 时必须显式传站点。
+4. **`report.js`**：扫描 `file/<site>/*.xlsx`，按站点生成索引、日期明细和共享样式，并生成 `file/index.html` 总导航。索引页内联跨日期最新 `LATEST_PREVIEW_COUNT=10` 条预览；`generateAllReports(sites)` 并发生成报告。
+5. **`server.js`**：托管 `file/`，支持 `/`、`/<site>/`、`/file/...`、`/health`、`HEAD` 和 xlsx 下载。使用 `safeJoin` 防止路径穿越，健康探针不扫描 xlsx。
 
-1. **`index.js`** — entry point. Parses `SITES` (comma-separated, fallback `SITE`/`CRAWLER_SITE`, default `yfbzb`)/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` from env (argv fallback), plus per-site overrides `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON (per-site > global > argv). Validates each site via `getSiteConfig()` and each `CRON_<SITE>` via `nextCronDelay()` (仅支持 `m h * * *`)，applies per-site random startup delay (`minDelay`–`maxDelay` seconds)，then starts `server.js` static server (`HTTP_PORT` default 8080, `HTTP_ENABLED` toggle, `healthcheck` on `/health`), pre-generates `file/index.html` navigation via `generateNav()`, and kicks off `refreshProxyProviders(site)` for every site（easy_proxies 代理站启动即拉取订阅，远端 `subscription` 变动让首轮换点拿到最新节点；fire-and-forget 不阻塞调度，限频 `EASY_PROXIES_REFRESH_COOLDOWN`），and runs a Node `setTimeout`-based scheduler — one `scheduleLoopForSite` per site, concurrent via `Promise.all`: single run + keepalive when `CRON_EXPR` empty, daily at `CRON_<SITE>` otherwise. Each `runOnce` does `crawl() → generateReport(site) → generateNav()` so navigation stays fresh. Sleep is interruptible (1s poll on `stopping`) so `docker stop` (SIGTERM) exits promptly and closes the HTTP server. Failed/placeholder sites are skipped with warn, valid sites continue.
+## 站点策略
 
-2. **`crawler.js`** — site-aware, exports `crawl`, `crawlPage`, `backoffDelay`, `readRecentIds`, `fileDir`, `stateFile`, `isStopping`, `refreshProxyProviders`.
-   - `crawl()`: orchestrates. **每轮开始先刷新 easy_proxies 订阅**（`refreshProviders({reason:'crawl_start'})`，仅代理站触发，内部限频 `EASY_PROXIES_REFRESH_COOLDOWN=600s`，失败不阻塞本轮；启动侧由 `index.js#refreshProxyProviders` 兜底）。Crawls in **batches concurrently** (`Promise.all` over `crawlPage`, per-site `batchSize` or `BATCH_SIZE`=10), with `interval` ms wait between batches. Terminates on either: (a) a batch where no page yielded new data **and** no page failed (`failedCount===0`) — any failure (`failedCount>0`) continues to avoid masking (per-site `failureThreshold`/`FAILURE_STOP_THRESHOLD`=2 仅用于 `continue_despite_failures` 的 warn 分级), (b) reaching the effective page cap, (c) any page returning `endReached` (site `isBoundary` default 403), or (d) **第一页探针轮尽**（页 1 `gateAbort` → `first_page_gate_abort` 取消本次抓取，后续页必同样被拦/不通）。**有效页数上限**：`effectiveTotalPages = min(配置 totalPages, 站点分页自报真实总页数)`——成功页经可选钩子 `parseTotalPages($, html, siteConfig)`（经 `extractRealTotalPages` 包装，缺钩子/非正整数/抛错 → 忽略）带回 `realTotalPages`，`crawl()` 每批合并（后观测覆盖前观测），循环条件与批次 clamp 均用有效上限；收窄至低于当前页时由循环条件自然退出；观测值不持久化进 checkpoint（续跑首批重新观测）。已知粒度：观测落地前已派发的批次最多超出 `batchSize-1` 页（去重/空页无害），不要为它串行化。
-   - `crawlPage()`: fetches one page — **`axios` 静态抓取**（per-site `timeout`/`headers`/`method` 或 `REQUEST_TIMEOUT`=30s + 真实 Chrome `User-Agent`）+ 站点策略解析（`parse` 完全接管或 `selectors` 默认），代理按 `PROXY_<SITE>/CEB_PROXY_URL/PROXY_URL/HTTP_PROXY` 优先级经 `http-proxy-agent/https-proxy-agent` 注入（`proxy:false + httpAgent/httpsAgent`，`NO_PROXY` 白名单，脱敏日志 `proxy_enabled/bypassed/invalid`）。`buildUrl(pageNo)`, `extractId(link)`, `isBoundary(error)`, `linkPrefix`, `parseTotalPages($, html, siteConfig)`, `batchSize`/`failureThreshold`/`method`/`fallbackOn405`/`proxy`/`requestDelay` 均可按站覆写（默认值内联于 `crawler.js` 的 `defaultBuildUrl`/`defaultExtractId`/`defaultIsBoundary`/`defaultParse`）。重试至多 `maxRetries`（默认 3）**指数退避 + 全量抖动**（`backoffDelay`: `base=2s`, cap 60s, `random(0, delay)`）**仅对网络/超时/405** — 边界不重试；`GET 405` 在 `fallbackOn405:true` 的站点自动切 `POST`（`qIdx` 经 `URL` API，保留 `Content-Type`），降级**不消耗 retries**（`triedFallback` 保证仅一次；若扣减会致循环无返回值隐式 undefined，2026-08-24 生产崩溃已修，测试 `test/dual405.test.js` 锁缝）+ 循环后终局兜底 return；双 405 快败（`GET 405 → POST 仍 405` 不再空转）并**单页即 `trySwitchProxy('dual405')` 换 IP**；**连续 405 熔断**（≥2 页 `status:405` 即 `circuit_break_405` 停爬）避免 100 页空刷——但换点成功会重置计数给新出口观察窗（2026-08-25 教训：旧逻辑换点不清零，新节点未验证先熔断）；**easy_proxies 换点轮换语义**（编排层 `trySwitchProxy` 返回 `{ok,from,to,exhausted}`，easy_proxies 知识收敛于 provider `sites/_easy_proxies.js#switchNode`，可经 `siteConfig.switchProxy` 按站覆盖）：只切管理 API 返回的健康节点端口（过滤不可用、未完成探测与拉黑节点），同一轮（两次成功页之间）不重复已试节点按序轮换，轮尽报 `proxy_pool_exhausted` 零请求短路不再切、由调用方累计失败自然熔断；同站换点经 `_proxySwitchQueue` Promise 链互斥（batchSize>1 时同批多个双 405 页串行分派不同节点，防读改写竞态重复记账）；换点成功即 destroy **本站**旧 keepAlive Agent 隧道（Agent 缓存键 `<site>|<proxyUrl>` 按站隔离，全局 HTTP_PROXY 下兄弟站隧道不受影响），成功页清空该站轮换记忆与节点快照（下一轮可从头再试各节点并按最新订阅重发现，WAF 封禁随时间变化）；每轮 `crawl()` 开始同样清空（键统一 `rotateKey` trim+lowercase 归一，写删两侧一致）；多站共用同一代理出口时启动告警 `proxy_shared_exit`（共享端口池可能使 A 站换点影响 B 站出口）；**网络级连败换 IP/熔断**：连续无 status 失败（ECONNRESET/超时，TLS 握手不通）达 `NET_FAIL_SWITCH_THRESHOLD`=2 页即 `trySwitchProxy('net_fail_streak')` 换节点（每轮连败只切一次、直连站 no-op），换过仍连败至 `NET_FAIL_BREAK_THRESHOLD`=6 页即 `circuit_break_net_fail` 停爬（2026-08-24 ceb 曾 5 轮 × ~67 分钟全页失败空转 ~5.6h）。**第一页探针**（2026-08-27）：`pageNo===1` 时任一失败路径（双 405 或网络失败）不再只换一次，而是**一路换点直到某节点成功或节点池轮尽**——每换一次即清零 retries 重新打满该节点的重试额度，轮尽即返回 `gateAbort:true`（`first_page_gate_exhausted`），`crawl()` 收到后 `first_page_gate_abort` 取消本次抓取（回归 2026-08-27 生产日志：页 1-5 全败仍硬爬到页 6 浪费 ~5 分钟）。返回 `failed`/`endReached`/`status`/`gateAbort`（成功页另有 `realTotalPages`）供 `crawl()` 区分失败与到底。
-   - **403 is a data boundary, not a failure.** The site returns 403 for `pageNo` beyond today's available data, not for bans/limiting. `crawlPage` catches via site `isBoundary` (default 403), marks `endReached` (no retry), and `crawl()` stops cleanly. Don't "fix" 403 as if it were a connection failure.
-   - **Dedup is keyed on `id`**, done twice: in-memory against `readRecentIds()` (today's + yesterday's Excel) to filter the stream, then again at file-merge time via a `Set` of new ids to avoid writing duplicates. `extractId` is pluggable per-site (default `link.split('/').pop().split('.')[0]`).
-   - **Checkpoint / resume**: `state-<site>.json` via `stateFile(site)` (cwd-relative) stores `currentPage` + `existingIds` (Set serialized as array), written after each batch. On startup, if `state-<site>.json` exists, `crawl()` resumes from `currentPage` and seeds `existingIds` from it (instead of `readRecentIds(site)`); otherwise it starts at page 1 with `readRecentIds(site)`. On clean finish (403 boundary, `totalPages`, or early-stop), `state-<site>.json` is **deleted** — it only serves "crashed mid-run today, resume next time", never persists across days. Don't make it survive a successful run.
-   - **Graceful shutdown**: `SIGINT`/`SIGTERM` set a `stopping` flag (not an immediate exit). The main loop finishes the in-flight `Promise.all` batch, then breaks without starting the next (and skips the `interval` sleep). `allData` is flushed to Excel and the checkpoint is **kept** (so the next run resumes). A second signal force-exits. Global `stopping` is process-wide — `docker stop` stops all sites' in-flight batches gracefully.
-   - **Output partitioning**: results are grouped by `publishTime` and written to `file/<site>/<publishTime with / replaced by ->.xlsx` (site isolated, e.g. `file/yfbzb/2026-08-19.xlsx`; legacy flat `file/*.xlsx` kept without migration). Each file is read, merged with new rows (new rows win), and rewritten in full. Logs go through `log.js` (see below).
-   - **Site config**: `sites/yfbzb.js` is live, `sites/ceb.js` is live（`axios` + 代理换 IP，`buildUrl`/`parse`/`extractId`/`isBoundary`/`batchSize:1`/`requestDelay`/`headers`/`method:GET`/`fallbackOn405`，`CEB_PROXY_URL` 注入）, default strategy helpers (`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`) are inlined in `crawler.js`, `sites/_easy_proxies.js` is the default multi-port provider（`switchNode(siteConfig,{reason,proxyUrl,tried,cached})` 读取 `/api/nodes` 并返回 `{noop}` / `{exhausted,from,tried,nodes,leaves}` / `{switched,from,to,proxyUrl,tried,nodes,leaves}`；`refreshProviders()` 经 `POST /api/subscription/refresh` 刷新订阅并限频），`sites/index.js` exposes the site registry helpers (registry contains only `yfbzb`/`ceb`). `crawl({site,…})` and `crawlPage(pageNo, siteConfig, …)` are site-aware; old signatures are kept for tests.
+站点配置位于 `sites/<site>.js`，可提供 `buildUrl`、`parse`、`extractId`、`isBoundary`、`parseTotalPages`、`linkPrefix`、`batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay` 和 `fallbackOn405`。默认策略 `defaultBuildUrl`、`defaultParse`、`defaultExtractId`、`defaultIsBoundary` 内联在 `crawler.js`。注册表 `sites/index.js` 当前只包含 `yfbzb` 和 `ceb`。
 
-3. **`log.js`** — dual-channel logging, required by both `crawler.js` and `report.js` (replaces a previously duplicated `log()` in each). `console.log` Chinese messages (ISO + PID + site prefix, for humans / `docker logs` / scheduled-task stdout) **and** structured JSONL to `logs/<site>/crawler-YYYY-MM-DD.jsonl` (per-site per-day, `event` field grep-able: `page_fetched`/`page_failed`/`batch_done`/`crawl_end`/`retry`/`boundary_403`/etc., with `site` field). The two channels coexist — neither replaces the other. `log(msg, {site})` must pass `site` explicitly under multi-site concurrency (global `currentSite`/`setSite()` is retained for backward compat but races when sites run concurrently). `logDir(site)` / `pruneOldLogs(site)` are site-aware and per-call cwd-relative. `pruneOldLogs()` reuses the 30-day retention window and is called by `report.js`'s `generateReport(site)` so expired logs are cleaned alongside expired xlsx.
+`yfbzb` 直接使用 `axios`。`ceb` 使用 `axios` 加 `http-proxy-agent`/`https-proxy-agent`，代理优先级为 `PROXY_<SITE>`、`CEB_PROXY_URL`、`PROXY_URL`、`HTTP_PROXY`，并遵守 `NO_PROXY` 白名单。easy_proxies 代理提供方通过 `/api/nodes` 发现健康节点，通过端口轮换换 IP；`POST /api/subscription/refresh` 受冷却时间限制，失败时安全降级。
 
-4. **`report.js`** — per-site HTML reports + total navigation. `scanFiles(site)` reads/cleans `file/<site>/*.xlsx` (verifies zip magic, prunes >30 days) and returns `{date,fileName,rows}` sorted desc; `buildIndexHtml(files)` / `buildDetailHtml(file)` generate per-site `index.html` + `<date>.html` with `TOKENS_CSS`/`COMMON_CSS` inline style and client-side search/sort（索引页内联跨全部日期最新 `LATEST_PREVIEW_COUNT`=10 条做「最新公告」预览（每行带日期列）+ 「查看全部」跳最新日明细页，其余数据保持轻量不内联；站点索引/明细页均有 `← 返回导航`/`导航页` 入口回 `../index.html`）; `generateReport(site)` atomically writes `file/<site>/index.html` + `tokens.css` + detail pages and prunes logs. **Navigation**: `collectSiteStats(site)` + `buildNavHtml(sitesData)` + `generateNav(sites)` (dynamic discovery via `parseSitesList()` fallback, `yfbzb`/`ceb` pinned, placeholder per-site report if missing) writes `file/index.html` (total navigation, card grid, `NAV_CSS`) + `file/tokens.css`; `generateAllReports(sites)` concurrently generates all per-site reports then `generateNav()` so navigation reflects fresh totals. Navigation cards show `displayName`/`description`/`originUrl` from `sites/<site>.js` (fallback to key/baseUrl), stats row `总计天数 · 总记录 · 最近更新`, main CTA `→ file/<site>/index.html` and secondary `↗ 原站`.
+## 关键行为约定
 
-5. **`server.js`** — zero-dependency (Node `http`/`fs`/`path`) static server hosting `file/` on `HTTP_PORT` (default 8080, `HTTP_ENABLED` toggle). `createServer({port,root})` / `startServer()` / `buildHealthPayload()`. Routing: `/` → `file/index.html` (total nav), `/<site>/` or `/<site>` → `file/<site>/index.html`, `/file/...` prefix compatible, directory → `index.html` fallback, `safeJoin` prevents traversal, `HEAD` supported, correct `Content-Type`/`Content-Length`/`Cache-Control` and `Content-Disposition` for xlsx. **Health probe (lightweight)**: `GET /health`/`/healthz`/`/api/health` returns `{status:"ok", timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}` (`no-store`). `totals`/`sites` are kept only for backward-compat and always empty — per-circuit `scanFiles` over all xlsx was deliberately dropped to keep the high-frequency probe a cheap liveness check (see `buildHealthPayload`). `index.js` starts the server on boot and closes it on `SIGINT`/`SIGTERM` alongside `isStopping`.
+- 403 或站点 `isBoundary(error)` 判定表示数据边界，不是网络失败，不重试、不计入失败数，并返回 `endReached`。
+- 网络、超时和 405 才进入重试流程，使用指数退避加全量随机抖动；`backoffDelay()` 的基数为 2 秒，上限为 60 秒。
+- `GET 405` 在 `fallbackOn405` 开启时降级为 `POST`；双 405 快败并尝试换端口，成功换点后重置连续 405 计数。第一页探针会持续换用未尝试节点，直到成功或返回 `gateAbort`；节点池轮尽时 `crawl()` 取消本轮。
+- 连续无状态网络失败达到 `NET_FAIL_SWITCH_THRESHOLD=2` 时换 IP，换点后仍失败达到 `NET_FAIL_BREAK_THRESHOLD=6` 时熔断。
+- 去重以 `id` 为主键：先与今日和昨日 Excel 中的 `readRecentIds(site)` 比较，再在合并写盘时用 `Set` 再次保护，新行优先。
+- `state-<site>.json` 保存 `currentPage` 和 `existingIds`。正常完成时删除；优雅中断、代理熔断或写盘失败时保留，供下次续跑。
+- 输出按 `publishTime` 分组写入 `file/<site>/<date>.xlsx`；历史扁平 `file/*.xlsx` 保留，不迁移。
 
-## Conventions worth knowing
+## 测试与修改要求
 
-- UX strings, log messages, and CLI usage text are in **Chinese** — match this when editing user-facing output.
-- `page_content.html` 已不在仓库（yfbzb 离线样页快照曾用于校验 cheerio 选择器，现已移除）；ceb 无随仓样页，回归以线上解析/测试为准。
-- 默认走 `axios` 静态抓取；`ceb` 因 WAF（`acw_tc`/`acw_sc__v2`，固定 IP 被拦）经 `easy_proxies` multi-port 换 IP（`CEB_PROXY_URL`/`PROXY_CEB`，业务端口从 `24000` 开始，管理 API `9091`），其余站点直连；代理未配时直连，配后按 `NO_PROXY` 白名单分流，管理面不可达或节点池为空时安全降级，测试不受影响。
-- **ceb→ctbpsp 迁移已终止（2026-08-25）**：曾尝试切 `ctbpsp.com` JSON API，协议 100% 还原（acw_sc__v2 求解器/DES 解密/易盾完整链路）但网易易盾票据被服务端风控对全自动流量一律拒绝（沙箱/完整指纹浏览器/真实 Chrome 三环境对照闭环），且票据单次消费。全部成果归档于 `jsreverse-yidun/`（gitignore，含可直接切回的 `ceb.js`/`crawler.js` 实现与协议文档），结论与切回条件见 `docs/progress-ceb-ctbpsp.md`。**勿重复攻坚 ctbpsp 求解器**——卡点是服务端策略，非技术。
-- The target query encodes fixed filters (`provinceId=12&noticeType=3&invitedBidType=3`); per-site values now live in `sites/<site>.js` (`baseUrl`/`urlSuffix`/`selectors` plus optional strategy hooks `buildUrl`/`parse`/`extractId`/`isBoundary`/`linkPrefix`/`parseTotalPages`/`batchSize`/`failureThreshold`/`timeout`/`headers`/`proxy`/`requestDelay`/`fallbackOn405`), edited via site config rather than hardcoded strings in `crawl()`. Defaults are inlined in `crawler.js` (`defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`); the registry `sites/index.js` contains only `yfbzb`/`ceb`.
-- **Failure-vs-boundary separation** (post-grilling fix): a page that 403s is an `endReached` data boundary (logged as "无新增数据（站点边界）"), not a failure; genuine network errors retry (exponential backoff + jitter) then become `failed` and count toward `failureThreshold`. The two used to share the `hasNewData:false` path and triggered false early-stops — keep them separate. `isBoundary` is pluggable per-site.
-- `FAILURE_STOP_THRESHOLD` (=2), `BATCH_SIZE` (=10), `REQUEST_TIMEOUT` (=30000), `BACKOFF_BASE_MS` (=2000), `BACKOFF_CAP_MS` (=60000), and `USER_AGENT` are named constants near the top of `crawler.js`; per-site `failureThreshold`/`batchSize`/`timeout`/`headers`/`proxy`/`requestDelay` in `sites/<site>.js` override them（全站 `axios`，`ceb` 仅 `batchSize:1` + `requestDelay` 串行防风控）。
-- **Path consistency**: `fileDir(site)` (`file/<site>/`) and `stateFile(site)` (`state-<site>.json`) are cwd-relative, as is `log.js`'s `logs/<site>/` dir (resolved per-call, not frozen at module load, so `withTempCwd` test isolation works). `state-<site>.json` is per-site — one container runs multiple sites concurrently, checkpoints are per-site and don't collide. Keep them site-aware and cwd-relative.
-- **Docker**: copy `easy_proxies/config.yaml.example` to the untracked `easy_proxies/config.yaml` and fill `subscriptions` (or `nodes_file`) before starting Compose. `Dockerfile` is `node:20-alpine` + `tzdata`/`ca-certificates`/`ttf-freefont`/`su-exec` + `ENV TZ=Asia/Shanghai` + `WORKDIR /app` + `EXPOSE 8080` + `ENTRYPOINT ["node","index.js"]`（轻量无 `chromium`，`ceb` 换 IP 走 easy_proxies）；`docker-compose.yml` is `easy_proxies`（默认启用，multi-port `24000-24200`，管理 API `9091`）+ `crawler` with `SITES=yfbzb,ceb` (comma-separated, concurrent), `depends_on easy_proxies:started`, `mem_limit: 400m`/`cpus: 0.5`, per-site `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`, bind mounts `./file:/app/file`/`./logs:/app/logs`, `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` + `healthcheck` (`node require("http").get(.../health)`), `HTTP_PORT`/`HTTP_ENABLED` env, `CEB_PROXY_URL`/`EASY_PROXIES_CONTROLLER` env, optional `EASY_PROXIES_PASSWORD`/`EASY_PROXIES_REFRESH_COOLDOWN`, and `CRON_EXPR` scheduling; `.github/workflows/docker-build.yml` pushes the crawler image to Docker Hub (requires `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) with `npm test` gate and multi-architecture builds.
-- **One container multiple sites (concurrent)**: `SITES=yfbzb,ceb` runs sites concurrently via `Promise.all` per `scheduleLoopForSite`; `yfbzb` 为 `axios` 批次并发（`batchSize:10`），`ceb` 串行（`batchSize:1` + `requestDelay 2500-5500ms` + 双 405 快败/连续熔断 + 代理换 IP）；each site has independent `CRON_<SITE>` scheduling, isolated `file/<site>/`/`logs/<site>/`/`state-<site>.json`, and pluggable parsing via `sites/<site>.js` strategy. `SITE` (single) is retained for backward compat. An unregistered site under `SITES` is skipped with warn (no `file/<site>/`/`logs/<site>/` created); under `SITE=` it fails fast.
-- **Navigation & static serving**: `file/index.html` is the total navigation (dynamic `sites/*` discovery, `yfbzb`/`ceb` pinned, card CTA → `file/<site>/index.html`, secondary `↗ 原站` → `originUrl`/`baseUrl`), generated by `report.js#generateNav()` via `buildNavHtml`+`NAV_CSS` and refreshed after each `generateReport(site)` and on boot; `server.js` hosts `file/` on `HTTP_PORT` (default 8080) with a lightweight `/health` probe (see above), `file/tokens.css` shared between navigation and per-site reports, intended to be fronted by an external reverse proxy (`80/443 → 8080`) for domain access. Per-site `displayName`/`description`/`originUrl` live in `sites/<site>.js`.
+测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 9 个测试套件。
 
+不要手工编辑 `file/`、`logs/` 或其他运行时生成文件。修改站点时同步检查 `sites/index.js`、`crawler.js`、`README.md` 和相关测试；修改领域术语或架构决策时阅读 `CONTEXT.md` 和相关 `docs/adr/`。
 
-## 沟通和提交
+## 智能体技能
 
-- 回复使用中文。
-- 提交信息使用 Conventional Commit + 中文摘要。
-- 推荐验证信息写入 PR 或交付说明。
+### 问题追踪器（Issue）
 
-## Repository Documentation
+本仓库的问题单和规格说明记录在 GitHub Issues（CN-YoungYang/Crawler-Site）中，相关操作使用 `gh` 命令行工具。详见 `docs/agents/issue-tracker.md`。
 
-- `AGENTS.md` is the contributor guide and should stay aligned with this file.
-- `README.md` is the operator guide; its Compose example and easy_proxies environment table should stay aligned with `docker-compose.yml` and `.env.example`.
-- `TODOLIST.md` tracks the easy_proxies contract checks and the Docker/real-CEB verification still pending in environments without Docker.
-- Issues live in GitHub Issues; see `docs/agents/issue-tracker.md`.
-- Domain and architecture context is documented in `docs/agents/domain.md`.
+### 领域文档
 
-## Agent skills
-
-### Issue tracker
-
-Issues live in GitHub Issues (CN-YoungYang/Crawler-Site). See `docs/agents/issue-tracker.md`.
-
-### Domain docs
-
-Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
+本仓库采用单一上下文（single-context）：根目录 `CONTEXT.md` 与 `docs/adr/`。详见 `docs/agents/domain.md`。

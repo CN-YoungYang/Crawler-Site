@@ -1,4 +1,4 @@
-// easy_proxies multi-port 管理 API 适配器。
+// easy_proxies 多端口管理 API 适配器。
 // crawler 负责发现健康节点、轮换独立端口并重建代理隧道；easy_proxies 负责节点拨号、健康检查和订阅管理。
 const axios = require('axios');
 const { log } = require('../log');
@@ -183,7 +183,7 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
 
   const nodes = snapshot.nodes;
   if (!nodes.length) {
-    log(`easy_proxies 没有可用 multi-port 节点 [${site}] ${reason}`, {
+    log(`easy_proxies 没有可用多端口节点 [${site}] ${reason}`, {
       level: 'warn',
       event: 'proxy_pool_empty',
       context: { site, reason },

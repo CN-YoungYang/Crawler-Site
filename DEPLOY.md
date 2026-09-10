@@ -4,7 +4,7 @@
 
 部署后包含两个服务：
 
-- `easy_proxies`：为 `ceb` 提供 multi-port 代理。管理 API 使用容器网络内的 `9091`，代理端口范围为 `24000-24200`，默认不暴露到宿主机。
+- `easy_proxies`：为 `ceb` 提供多端口代理。管理 API 使用容器网络内的 `9091`，代理端口范围为 `24000-24200`，默认不暴露到宿主机。
 - `crawler`：由本地 `Dockerfile` 构建，抓取 `yfbzb`/`ceb`，生成 Excel 和 HTML 报告，并在 `HTTP_PORT`（默认 `8080`）提供静态访问。
 
 ## 1. 准备环境
@@ -90,7 +90,7 @@ CRON_EXPR=0 2 * * *
 | `CRON_EXPR` | 全局每日调度；为空表示单次运行后常驻。 |
 | `CRON_YFBZB` / `CRON_CEB` | 每站独立调度，优先级高于全局 cron。 |
 | `HTTP_PORT` | 报告服务端口，默认 `8080`。 |
-| `HTTP_ENABLED` | 是否启用报告服务；Compose healthcheck 要求为 `true`。 |
+| `HTTP_ENABLED` | 是否启用报告服务；Compose 的 `healthcheck`（健康检查）要求为 `true`。 |
 | `TZ` | 必须保持 `Asia/Shanghai`，否则日期分区可能偏移。 |
 
 ### 3.2 创建 easy_proxies 配置
@@ -150,7 +150,7 @@ docker compose config --quiet
 
 ## 5. 首次启动
 
-先拉取代理 sidecar，再构建并启动 crawler：
+先拉取代理旁车服务，再构建并启动 crawler：
 
 ```bash
 docker compose pull easy_proxies
@@ -158,7 +158,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-当前 Compose 对 crawler 同时声明了 `build` 和 `image`：执行 `docker compose up -d --build` 时以本地 `Dockerfile` 构建为准，并按 Compose 的 `image` 字段标记为 `rxyoungyang/crawler:latest`；CI 发布地址由 `DOCKERHUB_USERNAME` secret 决定，如用户名不同需同步修改 `docker-compose.yml` 的 `image`。
+当前 Compose 对 crawler 同时声明了 `build` 和 `image`：执行 `docker compose up -d --build` 时以本地 `Dockerfile` 构建为准，并按 Compose 的 `image` 字段标记为 `rxyoungyang/crawler:latest`；CI 发布地址由 `DOCKERHUB_USERNAME` 密钥决定，如用户名不同需同步修改 `docker-compose.yml` 的 `image`。
 
 查看启动日志：
 
@@ -223,7 +223,7 @@ logs/yfbzb/crawler-YYYY-MM-DD.jsonl
 logs/ceb/crawler-YYYY-MM-DD.jsonl
 ```
 
-`file/` 和 `logs/` 是 bind mount，删除容器不会删除其中的数据。
+`file/` 和 `logs/` 是 绑定挂载，删除容器不会删除其中的数据。
 
 ## 7. 生产环境建议
 
@@ -319,13 +319,13 @@ git checkout <旧提交或标签>
 docker compose up -d --build
 ```
 
-不要使用 `docker compose down -v` 作为常规更新命令；`file/` 和 `logs/` 是宿主机 bind mount。
+不要使用 `docker compose down -v` 作为常规更新命令；`file/` 和 `logs/` 是宿主机 绑定挂载。
 
-## 10. checkpoint 续跑
+## 10. 断点续跑
 
-正常完成、触达边界或达到页数上限后，`state-<site>.json` 会被删除。收到 `SIGTERM`、代理熔断或文件写入失败时会保留 checkpoint。
+正常完成、触达边界或达到页数上限后，`state-<site>.json` 会被删除。收到 `SIGTERM`、代理熔断或文件写入失败时会保留断点。
 
-Compose 默认没有挂载 checkpoint。需要容器删除后仍能续跑时，在 crawler 的 `volumes` 中加入实际启用站点的挂载：
+Compose 默认没有挂载断点。需要容器删除后仍能续跑时，在 crawler 的 `volumes` 中加入实际启用站点的挂载：
 
 ```yaml
 volumes:
@@ -335,7 +335,7 @@ volumes:
   - ./state-ceb.json:/app/state-ceb.json
 ```
 
-checkpoint 只是临时续跑状态，真正的归档对象是 `file/` 和 `logs/`。
+断点只是临时续跑状态，真正的归档对象是 `file/` 和 `logs/`。
 
 ## 11. 停止和清理
 
@@ -345,7 +345,7 @@ checkpoint 只是临时续跑状态，真正的归档对象是 `file/` 和 `logs
 docker compose stop
 ```
 
-停止并删除容器/网络，但保留 bind mount 数据：
+停止并删除容器/网络，但保留 绑定挂载数据：
 
 ```bash
 docker compose down
@@ -357,9 +357,9 @@ docker compose down
 
 升级 Docker Compose v2。当前 Compose 使用了可选 `.env` 配置，过旧版本无法识别 `required: false`。
 
-### crawler 显示 unhealthy
+### crawler 显示不健康
 
-确认 `HTTP_ENABLED=true`。Compose healthcheck 固定访问 `/health`，关闭 HTTP 服务会导致 crawler 被标记为 unhealthy。然后查看：
+确认 `HTTP_ENABLED=true`。Compose 健康检查固定访问 `/health`，关闭 HTTP 服务会导致 crawler 被标记为不健康。然后查看：
 
 ```bash
 docker compose logs --tail=200 crawler
@@ -386,7 +386,7 @@ EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
 
 ### `file/` 或 `logs/` 权限错误
 
-入口脚本会尝试把 bind mount 改为容器 `node` 用户所有。Linux 上仍失败时：
+入口脚本会尝试把 绑定挂载目录改为容器 `node` 用户所有。Linux 上仍失败时：
 
 ```bash
 sudo chown -R 1000:1000 file logs

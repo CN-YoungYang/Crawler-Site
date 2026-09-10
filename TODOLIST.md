@@ -1,14 +1,14 @@
-# easy_proxies 迁移 TODO
+# easy_proxies 迁移待办清单
 
 更新时间：2026-09-08
 
 ## 当前已完成
 
-- [x] 选用 `ghcr.io/jasonwong1991/easy_proxies:latest` 作为 Compose 代理 sidecar。
-- [x] 新增 `easy_proxies/` 配置目录和 `config.yaml.example`，采用 `multi-port` 模式。
+- [x] 选用 `ghcr.io/jasonwong1991/easy_proxies:latest` 作为 Compose 代理 旁车服务。
+- [x] 新增 `easy_proxies/` 配置目录和 `config.yaml.example`，采用 `multi-port`（多端口）模式。
 - [x] Compose 挂载 `./easy_proxies:/etc/easy_proxies`，crawler 默认使用 `easy_proxies:24000`。
 - [x] 新增 `sites/_easy_proxies.js`，负责管理 API、节点发现、端口轮换、认证和订阅刷新。
-- [x] crawler 支持代理 provider 选择和运行时代理端口切换。
+- [x] crawler 支持代理提供方选择和运行时代理端口切换。
 - [x] CEB 配置为 `GET 405 → POST 405` 后切换 easy_proxies 节点，再重新请求当前页面。
 - [x] 移除旧代理适配器、配置目录及 Compose/文档引用，运行链路仅保留 easy_proxies。
 - [x] 增加真实配置、节点文件、运行时文件的 Git 忽略规则。

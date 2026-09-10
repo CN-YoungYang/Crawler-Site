@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-# 宿主机 bind-mount 的 file/logs 可能是 root 属主（首次 mkdir 时），容器内 USER node(1000) 会 EACCES。
+# 宿主机绑定挂载的 file/logs 可能是 root 属主（首次 mkdir 时），容器内 USER node(1000) 会 EACCES。
 # 此处以 root 起步，尽力 chown 后再降权到 node 执行，避免每次部署都需宿主机手动 chown。
 mkdir -p /app/file /app/logs
 chown -R node:node /app/file /app/logs 2>/dev/null || true

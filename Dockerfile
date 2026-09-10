@@ -19,6 +19,6 @@ RUN mkdir -p /app/file /app/logs && chown -R node:node /app && chmod +x /app/doc
 
 EXPOSE 8080
 
-# 以 root 启动 entrypoint，内部完成宿主机 bind-mount 的 chown 后再降权到 node
+# 以 root 启动入口脚本，内部完成宿主机绑定挂载目录的 chown 后再降权到 node
 USER root
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

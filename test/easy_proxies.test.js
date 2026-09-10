@@ -1,4 +1,4 @@
-// Seam: easy_proxies 管理 API 契约、健康节点端口轮换与 CEB 双 405 重试。
+// 边界：easy_proxies 管理 API 契约、健康节点端口轮换与 CEB 双 405 重试。
 const assert = require('assert');
 const { mockAxios, freshCrawler } = require('./helper');
 
@@ -272,10 +272,10 @@ async function main() {
   await testAuthenticationAndRefresh();
   await testSafeDegradation();
   await testCebDouble405RetriesCurrentPage();
-  console.log('easy_proxies 节点契约/端口轮换/认证降级/CEB 双 405 重试: OK');
+  console.log('easy_proxies 节点契约/端口轮换/认证降级/CEB 双 405 重试：通过');
 }
 
 main().catch(error => {
-  console.error('FAIL', error.stack || error.message);
+  console.error('失败', error.stack || error.message);
   process.exit(1);
 });

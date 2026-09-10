@@ -1,4 +1,4 @@
-// Seam 1: crawlPage 去重（Set 化改动的核心）
+// 边界 1：crawlPage 去重（Set 化改动的核心）
 // 行为：已存在 id 被跳过；新 id 进入 pageData 且被补进 existingIds（跨批次去重）。
 const assert = require('assert');
 const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
@@ -27,10 +27,10 @@ async function main() {
     restore();
     assert.strictEqual(res.pageData.length, 1, '只有新 id 进入 pageData');
     assert.strictEqual(res.pageData[0].id, NEW_ID, '留下的应是新记录');
-    // 注：existingIds 的补充发生在 crawl() 批量循环里，不在 crawlPage，故不在此 seam 断言。
+    // 注：existingIds 的补充发生在 crawl() 批量循环里，不在 crawlPage，故不在此边界断言。
   }
 
-  console.log('crawlPage 去重: OK');
+  console.log('crawlPage 去重：通过');
 }
 
-main().catch(e => { console.error('FAIL', e.message); process.exit(1); });
+main().catch(e => { console.error('失败', e.message); process.exit(1); });

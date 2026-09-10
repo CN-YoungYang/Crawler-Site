@@ -1,6 +1,6 @@
-/* Taste Skill: Clean Utility & High-Density Data
- * theme: system-adaptive (light/dark)
- * typography: system sans + mono for data
+/* 设计规范：简洁实用与高密度数据
+ * 主题：随系统适配（浅色/深色）
+ * 字体：系统无衬线字体 + 数据等宽字体
  */
 :root {
   color-scheme: light dark;

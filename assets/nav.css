@@ -1,4 +1,4 @@
-/* Nav utility bar */
+/* 导航工具栏 */
   .nav-utility {
     display: flex;
     justify-content: space-between;
@@ -43,7 +43,7 @@
   }
   .nav-utility-meta a:hover { color: var(--fg); border-bottom-color: var(--border-strong); }
 
-  /* Hero: asymmetric split */
+  /* 首屏：非对称分栏 */
   .nav-hero {
     display: grid;
     grid-template-columns: 1.35fr 0.9fr;
@@ -111,7 +111,7 @@
   }
   .nav-hero-stat--accent { background: var(--accent-soft); }
 
-  /* Section head */
+  /* 分区标题 */
   .nav-section-head {
     display: flex;
     justify-content: space-between;
@@ -122,7 +122,7 @@
   .nav-section-title { margin: 0; font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; color: var(--fg); }
   .nav-section-note { font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg-muted); }
 
-  /* Site list: editorial rows */
+  /* 站点列表：编辑式行布局 */
   .site-list {
     display: flex;
     flex-direction: column;

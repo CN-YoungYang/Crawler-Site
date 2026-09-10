@@ -1,5 +1,5 @@
 services:
-  # 代理 sidecar：easy_proxies 为 CEB 提供 multi-port 独立节点入口。
+  # 代理旁车服务：easy_proxies 为 CEB 提供多端口独立节点入口。
   # 首次使用：cp easy_proxies/config.yaml.example easy_proxies/config.yaml，再填写 subscriptions。
   # crawler 通过 easy_proxies:9091 获取健康节点；CEB 默认从 24000 端口开始。
   easy_proxies:
@@ -31,7 +31,7 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - HTTP_PORT=${HTTP_PORT:-8080}
       - HTTP_ENABLED=${HTTP_ENABLED:-true}
-      # 代理：CEB 默认使用 easy_proxies 的第一个 multi-port 节点；切点时由 crawler 动态改端口。
+      # 代理：CEB 默认使用 easy_proxies 的第一个多端口节点；切点时由 crawler 动态改端口。
       # - 全站：HTTP_PROXY=http://easy_proxies:24000（不建议，yfbzb 通常应直连）
       # - 单站：CEB_PROXY_URL=http://easy_proxies:24000 / PROXY_CEB=http://easy_proxies:24000
       # - 白名单：NO_PROXY=localhost,127.0.0.1,yfbzb.com
@@ -48,7 +48,7 @@ services:
     volumes:
       - ./file:/app/file
       - ./logs:/app/logs
-      # 崩溃续跑 checkpoint（按需挂载）
+      # 崩溃断点续跑（按需挂载）
       # - ./state-yfbzb.json:/app/state-yfbzb.json
       # - ./state-ceb.json:/app/state-ceb.json
     depends_on:

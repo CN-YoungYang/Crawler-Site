@@ -1,11 +1,11 @@
-// Seam 4: crawl 终止条件（六条分支）
+// 边界 4：crawl 终止条件（六条分支）
 // (a) 首批含 403 → endReached，当前批并发发完后不进下一批
 // (b) 一批无新数据且失败 ≤ threshold → 早停，不爬下一批
 // (c) 每页有新数据 → 爬满 totalPages（兼作 (f) 回归：夹具无分页信息 → 行为不变）
 // (d) 站点分页自报真实总页数 < 配置 → 批间收窄，精确止步于 min(真实, 配置)
 // (e) 站点自报 > 配置 → min 规则，配置仍为硬上限
 // (g) 两站 parseTotalPages 钩子纯函数单测（直接 require sites/*，非新缝）
-// (h) checkpoint 续跑 + 收窄低于当前页 → 一批后自然退出并清除 checkpoint
+// (h) 断点续跑 + 收窄低于当前页 → 一批后自然退出并清除断点
 // 每个用例都套 withTempCwd，避免 crawl 把 Excel 写回仓库 file/ 污染真实数据。
 const assert = require('assert');
 const fs = require('fs');
@@ -106,7 +106,7 @@ async function main() {
     const yfbzb = require('../sites/yfbzb');
     const ceb = require('../sites/ceb');
 
-    // yfbzb：controls「共 3000 条」÷ urlSuffix pageSize=30 → 100
+    // yfbzb：分页控件中的「共 3000 条」÷ urlSuffix pageSize=30 → 100
     const yfbzbHtml = yfbzbPagination({ totalRecords: 3000, pageSize: 30 });
     assert.strictEqual(yfbzb.parseTotalPages(cheerio.load(yfbzbHtml), yfbzbHtml, yfbzb), 100);
 
@@ -133,7 +133,7 @@ async function main() {
     assert.strictEqual(ceb.parseTotalPages(cheerio.load('<html><body></body></html>')), null);
   }
 
-  // ---- (h) checkpoint 续跑 + 立即收窄低于当前页：一批后退出并清除 checkpoint ----
+  // ---- (h) 断点续跑 + 立即收窄低于当前页：一批后退出并清除断点 ----
   {
     await withTempCwd(() => {
       fs.mkdirSync(path.join(process.cwd(), '.crawler-test'), { recursive: true });
@@ -142,19 +142,19 @@ async function main() {
       let calls = 0;
       const restore = mockAxios(() => {
         calls++;
-        return { status: 200, data: pageHtml([yfbzbRow(String(calls).padStart(9, '0'))]) + yfbzbPagination({ totalRecords: 90, pageSize: 30 }) }; // real=3
+        return { status: 200, data: pageHtml([yfbzbRow(String(calls).padStart(9, '0'))]) + yfbzbPagination({ totalRecords: 90, pageSize: 30 }) }; // 真实页数=3
       });
       const { crawl } = freshCrawler();
       return crawl(100, 0).then(() => {
         restore();
-        assert.strictEqual(calls, 10, '续跑自页 5 起发一批 10 页（5–14），观测 real=3 < 当前页 15 后条件退出');
-        assert.strictEqual(fs.existsSync('state-yfbzb.json'), false, '干净结束应清除 checkpoint');
+        assert.strictEqual(calls, 10, '续跑自页 5 起发一批 10 页（5–14），观测 真实页数=3 < 当前页 15 后条件退出');
+        assert.strictEqual(fs.existsSync('state-yfbzb.json'), false, '干净结束应清除断点');
       });
     });
   }
 
-  console.log('crawl 终止条件: OK');
-  // File write errors must rewind the checkpoint to the first page of this run.
+  console.log('crawl 终止条件：通过');
+  // 文件写入失败时，必须将断点回退到本次运行的起始页。
   {
     const xlsx = require('xlsx');
     const originalWriteFile = xlsx.writeFile;
@@ -178,9 +178,9 @@ async function main() {
       xlsx.writeFile = originalWriteFile;
       restoreAxios();
     }
-    assert.strictEqual(checkpoint.currentPage, 1, 'file write failure must rewind to the run start page');
-    assert.deepStrictEqual(checkpoint.existingIds, [], 'failed rows must not remain marked as persisted');
+    assert.strictEqual(checkpoint.currentPage, 1, '文件写入失败时必须将断点回退到本次运行的起始页');
+    assert.deepStrictEqual(checkpoint.existingIds, [], '写入失败的记录不能继续被标记为已落盘');
   }
 }
 
-main().catch(e => { console.error('FAIL', e.message); process.exit(1); });
+main().catch(e => { console.error('失败', e.message); process.exit(1); });

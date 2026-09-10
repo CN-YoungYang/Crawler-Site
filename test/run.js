@@ -1,4 +1,4 @@
-// 统一入口：跑 test/*.test.js 全部 → 一个 OK / 任何 FAIL 退出码非零。
+// 统一入口：跑 test/*.test.js 全部 → 全部通过或失败时返回对应退出码。
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');

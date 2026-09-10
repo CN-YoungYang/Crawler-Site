@@ -1,4 +1,4 @@
-// Seam 3: 文件合并去重（新数据优先）
+// 边界 3：文件合并去重（新数据优先）
 // 行为：已存在 file/<site>/<publishTime>.xlsx 里同 id 旧行被新行覆盖、不同 id 旧行保留。
 // 通过 crawl() 整段驱动：mock axios 返回新记录，预置含同 id 旧行 + 不同 id 旧行的 Excel。
 const assert = require('assert');
@@ -36,7 +36,7 @@ async function main() {
     assert.strictEqual(rows.length, 3, '最终 3 行：新2 + 保留旧1');
   });
 
-  console.log('文件合并去重: OK');
+  console.log('文件合并去重：通过');
 }
 
-main().catch(e => { console.error('FAIL', e.message); process.exit(1); });
+main().catch(e => { console.error('失败', e.message); process.exit(1); });

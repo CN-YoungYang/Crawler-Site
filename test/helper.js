@@ -6,12 +6,12 @@ const Module = require('module');
 
 const AXIOS_PATH = require.resolve('axios');
 const CRAWLER_PATH = require('path').resolve(__dirname, '..', 'crawler.js');
-// sites/_easy_proxies.js 同样在顶层钉死 axios 引用（代理换点 provider），
+// sites/_easy_proxies.js 同样在顶层钉死 axios 引用（代理换点提供方），
 // 需与 crawler 一并重载才能捕获当前 cache 里的 fake axios。
 const EASY_PROXIES_PATH = require('path').resolve(__dirname, '..', 'sites', '_easy_proxies.js');
 
 function mockAxios(handler) {
-  // handler: (url, config) => { data, status } | throws (网络错误则抛 axios 风格对象)
+  // handler: (url, config) => { data, status } | 抛出异常（网络错误时抛出 axios 风格对象）
   // 支持 axios.get(url, config) / axios.post(url, data, config) / axios({url, ...})
   const fake = (url, config) => {
     if (typeof url === 'object') {

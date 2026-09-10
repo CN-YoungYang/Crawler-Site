@@ -1,4 +1,4 @@
-// Seam 2: crawlPage 403 边界语义
+// 边界 2：crawlPage 403 边界语义
 // 行为：403 → endReached:true / failed:false / 不重试（handler 仅被调一次）。
 // axios 的 403 会以 error.response.status=403 抛出，crawlPage 在 catch 里识别。
 const assert = require('assert');
@@ -22,7 +22,7 @@ async function main() {
   assert.strictEqual(res.pageData.length, 0, '403 不产生数据');
   assert.strictEqual(calls, 1, '403 不应重试');
 
-  console.log('crawlPage 403 边界: OK');
+  console.log('crawlPage 403 边界：通过');
 }
 
-main().catch(e => { console.error('FAIL', e.message); process.exit(1); });
+main().catch(e => { console.error('失败', e.message); process.exit(1); });
