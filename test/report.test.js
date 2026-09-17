@@ -10,6 +10,8 @@ const { withTempCwd } = require('./helper');
 
 const REPORT_PATH = require.resolve('../report');
 const SITE = 'yfbzb';
+const REPORT_DATE = new Date(Date.now() + 8 * 3600000 - 86400000).toISOString().slice(0, 10);
+const REPORT_DATE_SLASH = REPORT_DATE.replace(/-/g, '/');
 
 function freshReport() {
   delete require.cache[REPORT_PATH];
@@ -42,9 +44,9 @@ async function main() {
 
     const wb = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet([
-      { id: '1', title: '正常标题', link: 'https://x', noticeType: 'T', area: 'A', publishTime: '2026/08/17' }
+      { id: '1', title: '正常标题', link: 'https://x', noticeType: 'T', area: 'A', publishTime: REPORT_DATE_SLASH }
     ]), 'Sheet1');
-    xlsx.writeFile(wb, path.join(fileDir, '2026-08-17.xlsx'));
+    xlsx.writeFile(wb, path.join(fileDir, `${REPORT_DATE}.xlsx`));
 
     const { generateReport } = freshReport();
     await generateReport(SITE);
@@ -60,16 +62,16 @@ async function main() {
     assert.ok(previewMatch, '索引页应内联预览 JSON');
     const preview = JSON.parse(previewMatch[1]);
     assert.ok(Array.isArray(preview.rows) && preview.rows.length === 1, '单日数据预览应含该日记录');
-    assert.strictEqual(preview.rows[0].date, '2026-08-17', '预览行应携带日期');
-    assert.ok(indexHtml.includes('2026-08-17.xlsx'), '索引页应有下载链接');
-    assert.ok(indexHtml.includes('"2026-08-17"'), '索引页 JSON 应含日期');
+    assert.strictEqual(preview.rows[0].date, REPORT_DATE, '预览行应携带日期');
+    assert.ok(indexHtml.includes(`${REPORT_DATE}.xlsx`), '索引页应有下载链接');
+    assert.ok(indexHtml.includes(`"${REPORT_DATE}"`), '索引页 JSON 应含日期');
     assert.ok(indexHtml.includes("f.date + '.html'"), '索引页 JS 应拼明细页链接');
     assert.ok(indexHtml.includes('<span class="stat-label">总计日期</span><span class="stat-value">1</span>'), '统计应只计好文件');
     assert.ok(indexHtml.includes('stats-grid'), '索引页应有紧凑统计带');
     assert.ok(indexHtml.includes('date-search-status'), '索引页日期搜索应反馈结果数');
     assert.ok(indexHtml.includes('../index.html'), '索引页应有返回导航入口');
 
-    const detailHtml = fs.readFileSync(path.join(fileDir, '2026-08-17.html'), 'utf8');
+    const detailHtml = fs.readFileSync(path.join(fileDir, `${REPORT_DATE}.html`), 'utf8');
     assert.ok(detailHtml.includes('正常标题'), '明细页应含该日标题');
     assert.ok(detailHtml.includes('返回索引'), '明细页应有返回链接');
     assert.ok(detailHtml.includes('下载本日 XLSX'), '明细页应能直接下载当天数据');

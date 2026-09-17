@@ -6,8 +6,19 @@ const path = require('path');
 
 const RETENTION_DAYS = 30;
 
+// 兼容旧调用：并发场景应显式传 site，currentSite 可能产生竞态
+let currentSite = (process.env.SITE || process.env.SITES || 'yfbzb').split(',')[0].trim().toLowerCase() || 'yfbzb';
+
+function getSite() {
+  return currentSite;
+}
+
+function setSite(site) {
+  if (site) currentSite = String(site).toLowerCase();
+}
+
 function normalizeSite(site) {
-  return String(site || 'yfbzb').toLowerCase();
+  return String(site || currentSite || 'yfbzb').toLowerCase();
 }
 
 // 日志目录相对 cwd（与 file/ 输出同源），每次调用时解析，保证 withTempCwd 测试隔离
@@ -94,4 +105,4 @@ function log(message, { level = 'info', event = 'log', context, site } = {}) {
   appendJsonl(jsonlLine(ts, level, event, message, context, effectiveSite), effectiveSite);
 }
 
-module.exports = { log, pruneOldLogs, RETENTION_DAYS, logDir, normalizeSite };
+module.exports = { log, pruneOldLogs, RETENTION_DAYS, logDir, normalizeSite, setSite, getSite };

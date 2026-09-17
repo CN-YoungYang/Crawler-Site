@@ -9,7 +9,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 分页抓取招标信息：标题、链接、公告类型、地区、发布时间
 - 按 `id` 去重，避免重复入库（内存 + 落盘合并双重去重）
 - 按站点与发布日期分区存储为 Excel：`file/<site>/YYYY-MM-DD.xlsx`（如 `file/yfbzb/2026-08-19.xlsx`），历史扁平 `file/*.xlsx` 保留不迁移
-- 总导航 + 站点报告：`file/index.html` 总导航（动态发现 `sites/*`，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
+- 总导航 + 站点报告：`file/index.html` 总导航（按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
 - 轻量静态服务：`server.js`（零依赖 `http`）托管 `file/` 于 `HTTP_PORT`（默认 8080，`EXPOSE 8080`），路由 `/` → 总导航、`/yfbzb/`/`/ceb/` → 各站报告、`HEAD` 支持、`xlsx` 下载头、防路径穿越，`HTTP_ENABLED=false` 可禁用；`docker-compose.yml` 已配 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` 与 `healthcheck`，适合由外部反代（Nginx/Caddy/Traefik）将 `80/443 → 8080` 以域名暴露
 - 轻量健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}`（`no-store`），不在高频探针中扫描 xlsx；供 `docker healthcheck`、反代后端摘除与监控告警使用
 - 失败页与“数据到底”分离识别，越界页（403）不再误判为加载失败、不会因单页失败而提前终止整次爬取
@@ -257,6 +257,6 @@ crawler/
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 多端口换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
-- 总导航 `file/index.html` 由 `report.js#generateNav` 动态发现站点（`SITES` 优先，`yfbzb`/`ceb` 置顶），缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
+- 总导航 `file/index.html` 由 `report.js#generateNav` 按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会警告后跳过，单站点 `SITE=<未知>` 则快速失败。
 - 智能体工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。

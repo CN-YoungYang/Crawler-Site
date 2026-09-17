@@ -689,7 +689,6 @@ async function crawl(a, b, c, d) {
       await _provider.refreshProviders({ site, reason: 'crawl_start', siteConfig, proxyUrl: _refreshUrl });
     }
   } catch (_) {}
-  const allData = {};
 
   const checkpoint = loadCheckpoint(site);
   let currentPage;
@@ -708,6 +707,9 @@ async function crawl(a, b, c, d) {
   let stoppedBySignal = false;
   let totalNew = 0;
   let totalFailed = 0;
+  let fileWriteFailed = 0;
+  let fileWriteSucceeded = 0;
+  const failedIds = new Set();
   let endReached = false;
   let consecutive405 = 0;
   // 双 405 触发的成功换点次数（单轮运行内）：换点成功即重置 consecutive405 给新出口观察页
@@ -726,6 +728,7 @@ async function crawl(a, b, c, d) {
 
   while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
     const batchStartPage = currentPage;
+    const batchData = Object.create(null);
     if (stopping) {
       stoppedBySignal = true;
       break;
@@ -750,6 +753,7 @@ async function crawl(a, b, c, d) {
       if (failed) {
         failedCount++;
         totalFailed++;
+        retryFromPage = retryFromPage === null ? pageNo : Math.min(retryFromPage, pageNo);
         // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
         if (results[i].gateAbort) {
           gateAborted = true;
@@ -794,8 +798,16 @@ async function crawl(a, b, c, d) {
         let batchNew = 0;
         for (const item of pageData) {
           if (existingIds.has(item.id)) continue;
-          if (!allData[item.publishTime]) allData[item.publishTime] = [];
-          allData[item.publishTime].push(item);
+          const publishDate = normalizePublishDateSafe(item.publishTime);
+          if (!publishDate) {
+            log(`发布日期无效，跳过公告：${String(item.publishTime)}`, {
+              level: 'error', event: 'invalid_publish_date',
+              context: { page: pageNo, id: item.id, publishTime: String(item.publishTime), site }, site
+            });
+            continue;
+          }
+          if (!batchData[publishDate]) batchData[publishDate] = [];
+          batchData[publishDate].push(item);
           existingIds.add(item.id);
           totalNew++;
           batchNew++;
@@ -851,6 +863,16 @@ async function crawl(a, b, c, d) {
       log(`当前批次无新数据，但失败 ${failedCount} 页（阈值 ${failureThreshold}），失败页可能掩盖新数据，继续爬取下一批`, { level: 'warn', event: 'continue_despite_failures', context: { failedCount, threshold: failureThreshold, site }, site });
     }
 
+    const batchPersist = persistDataFiles(site, batchData);
+    fileWriteFailed += batchPersist.fileWriteFailed;
+    fileWriteSucceeded += batchPersist.fileWriteSucceeded;
+    for (const id of batchPersist.failedIds) failedIds.add(id);
+    for (const id of batchPersist.failedIds) existingIds.delete(id);
+    if (batchPersist.fileWriteFailed > 0) {
+      retryFromPage = retryFromPage === null ? batchStartPage : Math.min(retryFromPage, batchStartPage);
+      shouldStopCrawling = true;
+    }
+
     if (!shouldStopCrawling) {
       saveCheckpoint(site, currentPage, existingIds);
     }
@@ -868,68 +890,8 @@ async function crawl(a, b, c, d) {
     }
   }
 
-  let fileWriteFailed = 0;
-  let fileWriteSucceeded = 0;
-  const failedIds = new Set();
-  const createdDirs = new Set();
-  if (Object.keys(allData).length === 0) {
+  if (totalNew === 0) {
     log('没有爬取到任何新数据', { event: 'no_new_data', context: { site }, site });
-  } else {
-    for (const [publishTime, data] of Object.entries(allData)) {
-      const fileName = path.join(fileDir(site), `${publishTime.replace(/\//g, '-')}.xlsx`);
-      const dirName = path.dirname(fileName);
-      // 同一批次同 site 目录相同，失败仅告警一次，避免刷屏
-      try {
-        if (!createdDirs.has(dirName)) {
-          fs.mkdirSync(dirName, { recursive: true });
-          createdDirs.add(dirName);
-        }
-      } catch (e) {
-        const code = e.code || e.errno || 'UNKNOWN';
-        if (!createdDirs.has(dirName)) {
-          log(`创建目录失败 ${dirName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂无法落盘`, { level: 'error', event: 'file_mkdir_failed', context: { file: fileName, error: e.message, code, site }, site });
-          createdDirs.add(dirName);
-        }
-        fileWriteFailed++;
-        for (const item of data) failedIds.add(item.id);
-        continue;
-      }
-
-      try {
-        let existingFileData = [];
-        if (fs.existsSync(fileName)) {
-          const rows = readXlsxRowsSafe(fileName, site, 'merge_read_failed');
-          if (rows === null) {
-            try {
-              const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
-              fs.renameSync(fileName, bak);
-              log(`已备份损坏文件 ${fileName} → ${bak}`, { level: 'warn', event: 'corrupt_backed_up', context: { file: fileName, bak, site }, site });
-            } catch (renameErr) {
-              const code = renameErr.code || renameErr.errno || 'UNKNOWN';
-              log(`备份损坏文件失败 ${fileName}: ${renameErr.message} code=${code}`, { level: 'warn', event: 'corrupt_backup_failed', context: { file: fileName, error: renameErr.message, code, site }, site });
-            }
-          } else {
-            existingFileData = rows;
-          }
-        }
-
-        const newIds = new Set(data.map(item => item.id));
-        const combinedData = [...data, ...existingFileData.filter(item => !newIds.has(item.id))];
-
-        const ws = xlsx.utils.json_to_sheet(combinedData);
-        const wb = xlsx.utils.book_new();
-        xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
-        xlsx.writeFile(wb, fileName);
-
-        fileWriteSucceeded++;
-        log(`更新文件 ${fileName}，新增 ${data.length} 条记录`, { event: 'file_written', context: { file: fileName, newCount: data.length, site }, site });
-      } catch (e) {
-        const code = e.code || e.errno || 'UNKNOWN';
-        fileWriteFailed++;
-        for (const item of data) failedIds.add(item.id);
-        log(`写入文件失败 ${fileName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂未落盘，将随断点重试`, { level: 'error', event: 'file_write_failed', context: { file: fileName, error: e.message, code, site }, site });
-      }
-    }
   }
 
   // 落盘失败的 id 回滚出 existingIds，避免断点将未落盘数据标记为已爬
@@ -981,3 +943,111 @@ function readRecentIds(site) {
 }
 
 module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+
+
+function normalizePublishDateSafe(value) {
+  const raw = String(value == null ? '' : value).trim();
+  const datePart = raw.slice(0, 10).split('/').join('-');
+  if (datePart.length !== 10 || datePart[4] !== '-' || datePart[7] !== '-') return null;
+  const parts = [datePart.slice(0, 4), datePart.slice(5, 7), datePart.slice(8, 10)];
+  if (parts.some(part => !part || part.split('').some(ch => ch < '0' || ch > '9'))) return null;
+  if (raw.length > 10 && raw[10] !== ' ' && raw[10] !== '\t') return null;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return datePart;
+}
+
+function persistDataFiles(site, dataByDate) {
+  let fileWriteFailed = 0;
+  let fileWriteSucceeded = 0;
+  const failedIds = new Set();
+
+  for (const [publishTime, data] of Object.entries(dataByDate)) {
+    const publishDate = normalizePublishDateSafe(publishTime);
+    if (!publishDate) {
+      fileWriteFailed++;
+      for (const item of data) failedIds.add(item.id);
+      log(`发布日期无效，跳过写盘：${String(publishTime)}`, {
+        level: 'error',
+        event: 'invalid_publish_date',
+        context: { site, publishTime: String(publishTime) },
+        site
+      });
+      continue;
+    }
+
+    const fileName = path.join(fileDir(site), `${publishDate}.xlsx`);
+    const dirName = path.dirname(fileName);
+    try {
+      fs.mkdirSync(dirName, { recursive: true });
+    } catch (e) {
+      const code = e.code || e.errno || 'UNKNOWN';
+      fileWriteFailed++;
+      for (const item of data) failedIds.add(item.id);
+      log(`创建目录失败 ${dirName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂无法落盘`, {
+        level: 'error',
+        event: 'file_mkdir_failed',
+        context: { file: fileName, error: e.message, code, site },
+        site
+      });
+      continue;
+    }
+
+    try {
+      let existingFileData = [];
+      if (fs.existsSync(fileName)) {
+        const rows = readXlsxRowsSafe(fileName, site, 'merge_read_failed');
+        if (rows === null) {
+          const bak = `${fileName}.corrupt.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+          try {
+            fs.renameSync(fileName, bak);
+            log(`已备份损坏文件 ${fileName} → ${bak}`, {
+              level: 'warn',
+              event: 'corrupt_backed_up',
+              context: { file: fileName, bak, site },
+              site
+            });
+          } catch (renameErr) {
+            const code = renameErr.code || renameErr.errno || 'UNKNOWN';
+            log(`备份损坏文件失败 ${fileName}: ${renameErr.message} code=${code}`, {
+              level: 'warn',
+              event: 'corrupt_backup_failed',
+              context: { file: fileName, error: renameErr.message, code, site },
+              site
+            });
+          }
+        } else {
+          existingFileData = rows;
+        }
+      }
+
+      const newIds = new Set(data.map(item => item.id));
+      const combinedData = [...data, ...existingFileData.filter(item => !newIds.has(item.id))];
+      const ws = xlsx.utils.json_to_sheet(combinedData);
+      const wb = xlsx.utils.book_new();
+      xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
+      xlsx.writeFile(wb, fileName);
+      fileWriteSucceeded++;
+      log(`更新文件 ${fileName}，新增 ${data.length} 条记录`, {
+        event: 'file_written',
+        context: { file: fileName, newCount: data.length, site },
+        site
+      });
+    } catch (e) {
+      const code = e.code || e.errno || 'UNKNOWN';
+      fileWriteFailed++;
+      for (const item of data) failedIds.add(item.id);
+      log(`写入文件失败 ${fileName}: ${e.message} code=${code}，本批 ${data.length} 条数据暂未落盘，将随断点重试`, {
+        level: 'error',
+        event: 'file_write_failed',
+        context: { file: fileName, error: e.message, code, site },
+        site
+      });
+    }
+  }
+
+  return { fileWriteFailed, fileWriteSucceeded, failedIds };
+}

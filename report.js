@@ -820,7 +820,27 @@ async function generateReport(site) {
   log(`已生成报告 [${siteName}]：索引 ${indexHtmlPath(siteName)} + ${files.length} 个明细页（${files.reduce((n, f) => n + f.rows.length, 0)} 条记录）`, { event: 'report_generated', context: { site: siteName, files: files.length, records: files.reduce((n, f) => n + f.rows.length, 0) }, site: siteName });
 }
 
-async function generateNav(sites) {
+function resolveValidSites(targets) {
+  const { getSiteConfig } = require('./sites');
+  return targets.filter(site => {
+    try {
+      getSiteConfig(site);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
+let navGenerationQueue = Promise.resolve();
+
+function generateNav(sites) {
+  const next = navGenerationQueue.catch(() => {}).then(() => generateNavNow(sites));
+  navGenerationQueue = next.catch(() => {});
+  return next;
+}
+
+async function generateNavNow(sites) {
   let targets;
   if (sites && sites.length) {
     targets = sites.map(normalizeSite);
@@ -833,11 +853,7 @@ async function generateNav(sites) {
       targets = require('./sites').listEnabledSites();
     }
   }
-  const { getSiteConfig } = require('./sites');
-  const valid = [];
-  for (const s of targets) {
-    try { getSiteConfig(s); valid.push(s); } catch { /* 跳过未实现站点 */ }
-  }
+  const valid = resolveValidSites(targets);
   // yfbzb/ceb 置顶，其余按字母序
   const pinned = ['yfbzb', 'ceb'];
   valid.sort((a, b) => {
@@ -890,4 +906,11 @@ async function generateNav(sites) {
   return { sitesData, html };
 }
 
-module.exports = { generateReport, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS, LATEST_PREVIEW_COUNT };
+async function generateAllReports(sites) {
+  const { listEnabledSites } = require('./sites');
+  const targets = sites && sites.length ? sites.map(normalizeSite) : listEnabledSites();
+  const valid = resolveValidSites(targets);
+  await Promise.all(valid.map(generateReport));
+}
+
+module.exports = { generateReport, generateAllReports, generateNav, buildNavHtml, collectSiteStats, siteMeta, navHtmlPath, navTokensCssPath, scanFiles, buildIndexHtml, buildDetailHtml, getReportWindow, parseFileDate, fileDir, TOKENS_CSS, COMMON_CSS, NAV_CSS, LATEST_PREVIEW_COUNT };
