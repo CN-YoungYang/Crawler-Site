@@ -68,7 +68,7 @@ docker compose down
 
 ### 问题追踪器（Issue）
 
-本仓库的问题单和规格说明记录在 GitHub Issues（CN-YoungYang/Crawler-Site）中，相关操作使用 `gh` 命令行工具。详见 `docs/agents/issue-tracker.md`。
+本仓库的问题单和规格说明记录为 `.scratch/<feature>/` 下的 Markdown 文件。详见 `docs/agents/issue-tracker.md`。
 
 ### 领域文档
 
