@@ -121,11 +121,17 @@ function normalizeNodes(rawNodes) {
   }).filter(Boolean);
 }
 
+// 返回 { nodes, controller, source }：
+// - source: 'snapshot' 表示本次未触达管理 API，直接采用了上一轮的节点快照（零请求短路）；
+// - source: 'api'      表示本次真的查询了 /api/nodes。
+// 区分两者是必要的：快照路径下「已切换节点」只说明端口号变了，
+// 并不证明该端口背后有可用出口——管理面可能早已不可达（陈旧快照）。
 async function fetchNodes(siteConfig, proxyUrl, cached) {
   if (cached && Array.isArray(cached.nodes) && cached.nodes.length) {
     return {
       nodes: normalizeNodes(cached.nodes),
-      controller: cached.controller || ''
+      controller: cached.controller || '',
+      source: 'snapshot'
     };
   }
 
@@ -135,7 +141,7 @@ async function fetchNodes(siteConfig, proxyUrl, cached) {
       const response = await request(base, 'GET', '/api/nodes');
       const nodes = response && response.data && response.data.nodes;
       if (!Array.isArray(nodes)) throw new Error('easy_proxies /api/nodes 响应缺少 nodes 数组');
-      return { nodes: normalizeNodes(nodes), controller: base };
+      return { nodes: normalizeNodes(nodes), controller: base, source: 'api' };
     } catch (error) {
       lastError = error;
     }
@@ -182,11 +188,12 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
   }
 
   const nodes = snapshot.nodes;
+  const source = snapshot.source || 'api';
   if (!nodes.length) {
     log(`easy_proxies 没有可用多端口节点 [${site}] ${reason}`, {
       level: 'warn',
       event: 'proxy_pool_empty',
-      context: { site, reason },
+      context: { site, reason, source },
       site
     });
     return { noop: true };
@@ -207,11 +214,12 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
     log(`easy_proxies 节点池本轮已轮尽 [${site}] ${reason}（节点 ${nodes.length} 个，本轮已试 ${triedNames.length}）`, {
       level: 'warn',
       event: 'proxy_pool_exhausted',
-      context: { site, reason, leaves: nodes.length, tried: triedNames.length },
+      context: { site, reason, leaves: nodes.length, tried: triedNames.length, source },
       site
     });
     return {
       exhausted: true,
+      source,
       from: nodeLabel(current) || (currentPort ? `port:${currentPort}` : ''),
       tried: triedNames,
       leaves,
@@ -222,13 +230,25 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
 
   const newTried = [...triedNames, next.tag];
   const nextProxyUrl = proxyUrlForPort(proxyUrl, next.port);
-  log(`easy_proxies 已切换节点 [${site}] ${reason}：${nodeLabel(current) || `port:${currentPort || '?'}`} → ${nodeLabel(next)}（本轮已试 ${newTried.length}/${nodes.length}）`, {
-    event: 'proxy_switched',
-    context: { site, reason, from: nodeLabel(current), to: nodeLabel(next), port: next.port, tried: newTried.length, leaves: nodes.length },
-    site
-  });
+  // 快照路径下必须显式标注：本次换点未经验证（管理面未触达），
+  // 调用方据此提示「这只是端口号变了，不代表出口可用」。
+  if (source === 'snapshot') {
+    log(`easy_proxies 已切换节点（未验证，管理面未触达）[${site}] ${reason}：${nodeLabel(current) || `port:${currentPort || '?'}`} → ${nodeLabel(next)}，节点列表取自上一轮快照，出口可用性未经确认`, {
+      level: 'warn',
+      event: 'proxy_switched_stale_snapshot',
+      context: { site, reason, from: nodeLabel(current), to: nodeLabel(next), port: next.port, tried: newTried.length, leaves: nodes.length },
+      site
+    });
+  } else {
+    log(`easy_proxies 已切换节点 [${site}] ${reason}：${nodeLabel(current) || `port:${currentPort || '?'}`} → ${nodeLabel(next)}（本轮已试 ${newTried.length}/${nodes.length}）`, {
+      event: 'proxy_switched',
+      context: { site, reason, from: nodeLabel(current), to: nodeLabel(next), port: next.port, tried: newTried.length, leaves: nodes.length },
+      site
+    });
+  }
   return {
     switched: true,
+    source,
     from: nodeLabel(current) || (currentPort ? `port:${currentPort}` : ''),
     to: nodeLabel(next),
     proxyUrl: nextProxyUrl,

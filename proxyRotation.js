@@ -24,7 +24,7 @@ function rotationKey(site) {
 }
 
 function makeSwitchResult(overrides) {
-  return { ok: false, from: '', to: '', exhausted: false, ...overrides };
+  return { ok: false, from: '', to: '', exhausted: false, stale: false, ...overrides };
 }
 
 function desensitizeProxyUrl(url) {
@@ -137,7 +137,7 @@ function createRotation(site, siteConfig, deps = {}) {
       return makeSwitchResult();
     }
     if (!out || out.noop) return makeSwitchResult();
-    if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true });
+    if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true, stale: out.source === 'snapshot' });
 
     // 换点成功：记下新出口地址，使后续请求真的走新节点端口
     if (typeof out.proxyUrl === 'string' && out.proxyUrl.trim()) {
@@ -155,7 +155,9 @@ function createRotation(site, siteConfig, deps = {}) {
     // 换点后废弃本站旧隧道长连接：keepAlive 的代理 socket 仍指向旧出口，
     // 不复位会继续用旧 IP 请求
     destroySiteAgents(key);
-    return makeSwitchResult({ ok: true, from: out.from || '', to: out.to || '' });
+    // stale=true 表示本次换点用的是上一轮快照、未触达管理面：
+    // 端口号变了，但出口可用性未经确认，调用方不应据此认为「换点成功即恢复」。
+    return makeSwitchResult({ ok: true, from: out.from || '', to: out.to || '', stale: out.source === 'snapshot' });
   }
 
   return {
