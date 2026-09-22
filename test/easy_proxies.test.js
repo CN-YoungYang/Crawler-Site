@@ -220,6 +220,10 @@ async function testSafeDegradation() {
 async function testCebDouble405RetriesCurrentPage() {
   let targetCalls = 0;
   let nodeCalls = 0;
+  // 记录每次业务请求实际使用的代理出口端口（由注入的 Agent 暴露），
+  // 取代原先读 config.runtimeProxyUrl——换点地址已属于 proxyRotation 的实现，
+  // 不在 siteConfig 上；行为验证不依赖状态存放位置。
+  const usedProxyPorts = [];
   const restoreAxios = mockAxios((url, config) => {
     const target = String(url);
     assert.strictEqual(config.proxy, false, '控制面与业务代理都应由 crawler 显式处理');
@@ -228,6 +232,8 @@ async function testCebDouble405RetriesCurrentPage() {
       return { data: { nodes: activeNodes().slice(0, 3) }, status: 200 };
     }
     targetCalls++;
+    const agentProxyUrl = config && config.httpAgent && config.httpAgent.proxy && config.httpAgent.proxy.href;
+    if (agentProxyUrl) usedProxyPorts.push(new URL(agentProxyUrl).port);
     if (targetCalls <= 2) {
       const error = new Error('Request failed with status code 405');
       error.response = { status: 405, data: '<html>waf</html>' };
@@ -256,7 +262,8 @@ async function testCebDouble405RetriesCurrentPage() {
     assert.strictEqual(result.failed, false, '切换端口后当前页重试成功，不应标记失败');
     assert.strictEqual(targetCalls, 3, '应为 GET 405、POST 405、换端口后的当前页重试');
     assert.strictEqual(nodeCalls, 1, '首次换端口只需读取一次节点列表');
-    assert.strictEqual(config.runtimeProxyUrl, 'http://easy_proxies:24001/');
+    // 行为断言：换点后当前页重试必须真的走新出口端口（24001），而非仍用初始的 24000
+    assert.strictEqual(usedProxyPorts[usedProxyPorts.length - 1], '24001', '双 405 换点后当前页重试应使用新节点端口');
   } finally {
     Math.random = previousRandom;
     restorePassword();

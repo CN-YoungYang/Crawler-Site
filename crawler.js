@@ -7,6 +7,7 @@ const { log } = require('./log');
 const { getSiteConfig, normalizeSite } = require('./sites');
 const easyProxies = require('./sites/_easy_proxies');
 const { shanghaiDateStr, hasValidXlsxHeader } = require('./utils');
+const proxyRotation = require('./proxyRotation');
 
 // 默认站点策略（原 sites/_base.js，已内联避免单实现抽象层）
 function defaultExtractId(link) {
@@ -67,22 +68,8 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // ---- 代理（ceb 换 IP 绕过 WAF，轻量替代浏览器引擎） ----
 // 优先级：PROXY_<SITE> / <SITE>_PROXY_URL > PROXY_URL > HTTPS_PROXY/HTTP_PROXY > siteConfig.proxyUrl
 // 值形如 http://easy_proxies:24000 或 http://user:pass@host:port；NO_PROXY 直连白名单
-function desensitizeProxyUrl(url) {
-  if (!url) return '';
-  try {
-    const u = new URL(url);
-    const hasAuth = !!(u.username || u.password);
-    const hasQuery = !!u.search;
-    const hasHash = !!u.hash;
-    if (hasAuth || hasQuery || hasHash) {
-      const auth = hasAuth ? '***:***@' : '';
-      const q = hasQuery ? '?***' : '';
-      const h = hasHash ? '#***' : '';
-      return `${u.protocol}//${auth}${u.host}${u.pathname}${q}${h}`;
-    }
-    return `${u.protocol}//${u.host}${u.pathname}`;
-  } catch (_) { return url.replace(/:\/\/[^@]+@/, '://***:***@').replace(/\?.*$/, '?***').replace(/#.*$/, '#***'); }
-}
+// desensitizeProxyUrl 收敛于 proxyRotation.js（单一实现，避免两处逐字重复）
+const desensitizeProxyUrl = proxyRotation.desensitizeProxyUrl;
 
 function isNoProxy(targetUrl, siteConfig) {
   const raw = (siteConfig && siteConfig.noProxy) || process.env.NO_PROXY || process.env.no_proxy || '';
@@ -100,9 +87,8 @@ function isNoProxy(targetUrl, siteConfig) {
 
 function resolveProxyUrl(siteConfig) {
   if (siteConfig && siteConfig.proxy === false) return '';
-  if (siteConfig && typeof siteConfig.runtimeProxyUrl === 'string' && siteConfig.runtimeProxyUrl.trim()) {
-    return siteConfig.runtimeProxyUrl.trim();
-  }
+  // 本轮换点后的地址由 proxyRotation 实例持有（activeProxyUrl），
+  // 不再写回 siteConfig.runtimeProxyUrl——避免每轮可变状态寄居在 registry 单例上。
   const site = String((siteConfig && siteConfig.name) || '').toUpperCase();
   const candidates = [];
   if (site) {
@@ -128,8 +114,8 @@ function getProxyProvider(siteConfig, proxyUrl) {
   return null;
 }
 
-function getProxyAgents(siteConfig, targetUrl) {
-  const proxyUrl = resolveProxyUrl(siteConfig);
+function getProxyAgents(siteConfig, targetUrl, site, overrideProxyUrl) {
+  const proxyUrl = overrideProxyUrl || resolveProxyUrl(siteConfig);
   if (!proxyUrl) return null;
   if (targetUrl && isNoProxy(targetUrl, siteConfig)) return null;
   try { new URL(proxyUrl); } catch (e) {
@@ -137,100 +123,56 @@ function getProxyAgents(siteConfig, targetUrl) {
     return null;
   }
   // 复用 Agent，避免每页新建导致 socket 泄漏（尤其 batchSize 并发）。
-  // 缓存键含站点：全局 HTTP_PROXY 配法下多站解析出同一 proxyUrl，若共用条目，
-  // 一站换点 destroy 会打断兄弟站在途请求（2026-08-26 审查 #1）——各站独立隧道。
-  if (!getProxyAgents._cache) getProxyAgents._cache = new Map();
-  const siteKey = rotateKey((siteConfig && siteConfig.name) || '');
-  const cacheKey = `${siteKey}|${proxyUrl}`;
-  const cached = getProxyAgents._cache.get(cacheKey);
-  if (cached) return cached;
+  // 隧道按站隔离（审查 #1），键与换点记账同源，见 proxyRotation.rotationKey。
+  const siteKey = proxyRotation.rotationKey(site || (siteConfig && siteConfig.name) || '');
   try {
-    const { HttpsProxyAgent } = require('https-proxy-agent');
-    const { HttpProxyAgent } = require('http-proxy-agent');
-    const entry = {
-      proxyUrl,
-      httpAgent: new HttpProxyAgent(proxyUrl, { keepAlive: true }),
-      httpsAgent: new HttpsProxyAgent(proxyUrl, { keepAlive: true })
-    };
-    getProxyAgents._cache.set(cacheKey, entry);
-    return entry;
+    return proxyRotation.getProxyAgentEntry(siteKey, proxyUrl, url => {
+      const { HttpsProxyAgent } = require('https-proxy-agent');
+      const { HttpProxyAgent } = require('http-proxy-agent');
+      return {
+        proxyUrl: url,
+        httpAgent: new HttpProxyAgent(url, { keepAlive: true }),
+        httpsAgent: new HttpsProxyAgent(url, { keepAlive: true })
+      };
+    });
   } catch (e) {
     log(`代理组件加载失败，已回退直连：${e.message}`, { level: 'warn', event: 'proxy_agent_failed', context: { error: e.message, site: (siteConfig && siteConfig.name) || '' }, site: (siteConfig && siteConfig.name) || '' });
     return null;
   }
 }
 
+// makeSwitchResult 收敛于 proxyRotation.js（与换点结果同源，避免两处重复）
+const makeSwitchResult = proxyRotation.makeSwitchResult;
+
 // 双 405/网络连败的秒级换 IP：通过 easy_proxies 控制面切换多端口节点，
 // 也可经 siteConfig.switchProxy 按站覆盖；easy_proxies 知识收敛于 sites/_easy_proxies.js。
-// 轮换语义：池中节点按管理 API 返回顺序轮换，避免当前端口和已试节点反复打转：
-// - 只切真实节点端口：由 代理提供方过滤不可用节点并保留每轮已试记录；
-// - 同一轮（两次成功页之间）不重复已试节点，按列表顺序依次轮换；
-// - 轮尽不再切换并返回 exhausted（事件 proxy_pool_exhausted），由调用方累计失败自然熔断。
-// 返回 {ok, from, to, exhausted}；ok=true 表示本次真的切换了节点。
-const _proxyRotate = new Map(); // 轮换键 -> 本轮已试节点名数组
-const rotateKey = site => String(site || '').trim().toLowerCase();
+// 轮换语义、互斥、记账、快照、隧道销毁均已收敛至 proxyRotation 模块（与一轮 crawl() 同生命周期）。
+//
+// 跨站点的共用出口登记（原 _proxySharedExit）留在本文件：它的键是代理 URL、值是站点集合，
+// 是进程级跨站点状态，不属于单站每轮实例。
+const _proxySharedExit = new Map();
 
-function makeSwitchResult(overrides) {
-  return { ok: false, from: '', to: '', exhausted: false, ...overrides };
+// 每轮的 rotation 注册表：键为站点名，值为本轮实例。
+// 供 crawlPage 在未显式传入 switchProxy 时回退查找（旧签名兼容路径）。
+const _rotations = new Map();
+
+function registerRotation(site, rotation) {
+  _rotations.set(proxyRotation.rotationKey(site), rotation);
 }
 
-// 同站换点互斥：batchSize>1 时同批多个双 405 页并发进入 trySwitchProxy，
-// get→filter→PUT→push 的读改写交错会重复选择同一节点，导致 tried 重复记账并错误地判定轮尽
-// （2026-08-26 审查 #3）。串行化后每页拿到不同的下一个未试节点。
-const _proxySwitchQueue = new Map(); // 轮换键 -> Promise 链尾
-function withProxySwitchLock(key, fn) {
-  const prev = _proxySwitchQueue.get(key) || Promise.resolve();
-  const next = prev.catch(() => {}).then(fn);
-  _proxySwitchQueue.set(key, next.catch(() => {}));
-  return next;
+function unregisterRotation(site) {
+  _rotations.delete(proxyRotation.rotationKey(site));
+}
+
+function getRotation(site) {
+  return _rotations.get(proxyRotation.rotationKey(site)) || null;
 }
 
 async function trySwitchProxy(siteConfig, reason) {
-  const proxyUrl = resolveProxyUrl(siteConfig);
-  if (!proxyUrl) return makeSwitchResult();
-  // 轮换记忆键与 crawl() 的删键统一归一（写侧原用原始 siteConfig.name，
-  // 删侧用 normalizeSite 后的参数 site，两链不一致会永久残留致静默 exhausted——审查 #2）
-  const key = rotateKey(normalizeSite((siteConfig && siteConfig.name) || ''));
-  return withProxySwitchLock(key, async () => {
-    const provider = getProxyProvider(siteConfig, proxyUrl);
-    const switcher = (siteConfig && typeof siteConfig.switchProxy === 'function')
-      ? siteConfig.switchProxy
-      : provider && provider.switchNode;
-    if (typeof switcher !== 'function') return makeSwitchResult();
-    let out;
-    try {
-      out = await switcher.call(siteConfig, siteConfig, { reason, proxyUrl, tried: [...(_proxyRotate.get(key) || [])], cached: getProxyAgents._leafCache && getProxyAgents._leafCache.get(key) });
-    } catch (e) {
-      log(`代理切换异常 [${key}] ${reason}：${e.message}`, { level: 'warn', event: 'proxy_switch_failed', context: { site: key, reason, error: e.message }, site: key });
-      return makeSwitchResult();
-    }
-    if (!out || out.noop) return makeSwitchResult();
-    if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true });
-    if (typeof out.proxyUrl === 'string' && out.proxyUrl.trim()) {
-      siteConfig.runtimeProxyUrl = out.proxyUrl.trim();
-    }
-    // 代理提供方返回成功后才记账；缓存节点快照，轮尽后可零请求短路
-    _proxyRotate.set(key, Array.isArray(out.tried) ? out.tried : []);
-    if (!getProxyAgents._leafCache) getProxyAgents._leafCache = new Map();
-    getProxyAgents._leafCache.set(key, {
-      groupName: out.groupName,
-      leaves: out.leaves,
-      nodes: out.nodes,
-      currentTag: out.currentTag,
-      controller: out.controller
-    });
-    // 换点后废弃本站旧隧道长连接：keepAlive 的代理 socket 仍指向旧出口，不复位会继续用旧 IP 请求。
-    // 只清本站条目——全局 HTTP_PROXY 下兄弟站共用同一 proxyUrl 但各有独立 Agent（审查 #1）
-    if (getProxyAgents._cache) {
-      for (const [cacheKey, entry] of getProxyAgents._cache) {
-        if (!cacheKey.startsWith(`${key}|`)) continue;
-        try { entry.httpAgent.destroy(); } catch (_) {}
-        try { entry.httpsAgent.destroy(); } catch (_) {}
-        getProxyAgents._cache.delete(cacheKey);
-      }
-    }
-    return makeSwitchResult({ ok: true, from: out.from || '', to: out.to || '' });
-  });
+  const site = (siteConfig && siteConfig.name) || '';
+  const rotation = getRotation(site);
+  if (!rotation) return { ok: false, from: '', to: '', exhausted: false };
+  return rotation.switch(reason);
 }
 
 // 启动/每轮爬取前刷新代理订阅（easy_proxies 读取订阅并生成多端口节点）。
@@ -303,12 +245,17 @@ async function extractRealTotalPages(siteConfig, $, html) {
   }
 }
 
-async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existingIdsOrMaxRetries, maxRetriesArg) {
+async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existingIdsOrMaxRetries, maxRetriesArg, switchProxyArg) {
   // 兼容旧签名 crawlPage(pageNo, baseUrl, urlSuffix, existingIds, maxRetries)
-  // 新签名 crawlPage(pageNo, siteConfig|site, existingIds, maxRetries)
+  // 新签名 crawlPage(pageNo, siteConfig|site, existingIds, maxRetries, switchProxy)
+  //
+  // switchProxy: async (reason) => { ok, from, to, exhausted }
+  // crawlPage 对「换点」的全部需求就是失败时叫一下；试过哪些节点、缓存了什么、
+  // 何时销毁隧道都属于 proxyRotation 的实现，不在本函数的接口里。
   let siteConfig;
   let existingIds;
   let maxRetries = 3;
+  let switchProxy = switchProxyArg;
   let urlSuffixOverride = null;
   let baseUrlOverride = null;
 
@@ -326,11 +273,28 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   } else {
     siteConfig = resolveSiteConfig(siteOrBaseUrl);
     existingIds = urlSuffixOrExistingIds;
+    // 新签名：第 4 参为 maxRetries，第 5 参为 switchProxy（已由 switchProxyArg 接收）。
+    // 不可再用 maxRetriesArg 覆盖 maxRetries——新签名下它会传入回调函数，
+    // 使 while (retries < maxRetries) 立即为假、零请求返回 EXHAUSTED。
     if (existingIdsOrMaxRetries !== undefined) maxRetries = existingIdsOrMaxRetries;
-    if (maxRetriesArg !== undefined) maxRetries = maxRetriesArg;
   }
 
   if (!existingIds) existingIds = new Set();
+  // 未显式传入 rotation/switchProxy 时的回退（旧签名，或直接调用 crawlPage 的路径）：
+  // 优先复用本轮 crawl() 注册的实例；没有则按本站惰性建一个临时实例，
+  // 使「直接调 crawlPage」与「经 crawl() 调用」的换点行为一致。
+  // 第 5 参可直接传 rotation 实例（新用法），或传 switchProxy 回调（兼容）。
+  let rotation = null;
+  if (switchProxyArg && typeof switchProxyArg.switch === 'function') {
+    rotation = switchProxyArg;
+    switchProxy = reason => rotation.switch(reason);
+  } else if (typeof switchProxyArg === 'function') {
+    switchProxy = switchProxyArg;
+  } else {
+    rotation = getRotation(siteConfig && siteConfig.name)
+      || proxyRotation.createRotation(siteConfig && siteConfig.name, siteConfig, { resolveProxyUrl, getProxyProvider });
+    switchProxy = reason => rotation.switch(reason);
+  }
   const siteName = siteConfig.name || normalizeSite(siteConfig.name);
   // 第一页探针：pageNo===1 时若当前出口失败则一路换点，直到成功或节点池轮尽（见下方失败处理）
   const isFirstPage = pageNo === 1;
@@ -367,7 +331,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   while (retries < maxRetries) {
     try {
       await maybeThrottle();
-      const proxyAgents = getProxyAgents(siteConfig, url);
+      // 换点后必须用实例记录的当前出口地址建/取隧道，否则换了节点仍走旧端口
+      const proxyAgents = getProxyAgents(siteConfig, url, siteName, rotation ? rotation.currentProxyUrl() : undefined);
       const axiosProxyOpts = proxyAgents ? { proxy: false, httpAgent: proxyAgents.httpAgent, httpsAgent: proxyAgents.httpsAgent } : {};
       let response;
       if (method === 'POST') {
@@ -460,7 +425,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         log(`第 ${pageNo} 页 POST 仍 405（GET→POST 双 405），不再重试直接跳过 [code=${error.code} status=${errStatus} method=${method}${extra405}]`, { level: 'error', event: 'page_failed_dual405', context: { page: pageNo, code: error.code, status: errStatus, method, site: siteName }, site: siteName });
         // 单页即换 IP：easy_proxies 场景轮换取下一个未试节点，避免攒够 consecutive405 才熔断
         let sw = makeSwitchResult();
-        try { sw = await trySwitchProxy(siteConfig, 'dual405'); } catch (_) {}
+        try { sw = await switchProxy('dual405'); } catch (_) {}
         // 第一页探针：当前出口被 WAF 拦就一路换点，直到成功或节点池轮尽（轮尽=后续页同样被拦，取消本次抓取）
         if (isFirstPage && (sw.ok || sw.exhausted)) {
           if (sw.exhausted) {
@@ -489,7 +454,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         // 换点重置：网络失败（无 status）达上限后，尝试换 IP 重试
         if (errStatus === undefined || errStatus === null) {
           let sw2 = makeSwitchResult();
-          try { sw2 = await trySwitchProxy(siteConfig, isFirstPage ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
+          try { sw2 = await switchProxy(isFirstPage ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
           // 第一页探针：当前出口网络不通就一直换，直到成功或节点池轮尽（轮尽=后续页同样不通，取消本次抓取）
           if (isFirstPage && (sw2.ok || sw2.exhausted)) {
             if (sw2.exhausted) {
@@ -524,10 +489,12 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   // 换点兜底：不限于第1页，换 IP 成功则递归重试一次（防数据丢失）
   if (!triedSwitch) {
     let sw3 = makeSwitchResult();
-    try { sw3 = await trySwitchProxy(siteConfig, pageNo === 1 ? 'first_page_exhausted' : 'exhausted'); } catch (_) {}
+    try { sw3 = await switchProxy(pageNo === 1 ? 'first_page_exhausted' : 'exhausted'); } catch (_) {}
     if (sw3.ok) {
       log(`第 ${pageNo} 页重试额度耗尽后已换 IP，立即重试该页`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName }, site: siteName });
-      return crawlPage(pageNo, siteConfig, existingIds, maxRetries);
+      // 必须把本轮 rotation 一并传入：省略第 5 参会退化为 getRotation 回退，
+      // 该回退在未注册时新建实例，使递归重试与本轮换点状态脱钩（换点记账丢失）。
+      return crawlPage(pageNo, siteConfig, existingIds, maxRetries, rotation || switchProxy);
     }
   }
   log(`第 ${pageNo} 页加载失败，重试额度耗尽 [code=EXHAUSTED method=${method}]`, { level: 'error', event: 'page_failed', context: { page: pageNo, method, site: siteName }, site: siteName });
@@ -630,22 +597,21 @@ function normalizeCrawlArgs(a, b, c, d) {
   };
 }
 
-// 多站共用同一代理出口的登记（proxyUrl -> 站点集合，crawl() 启动时写入）。
-// Agent 隧道按站隔离，但同一入口的端口/出口池仍可能被多个站点共用，因此保留告警。
-const _proxySharedExit = new Map();
+// 多站共用同一代理出口的登记见文件上方 _proxySharedExit（进程级，跨站点）。
 
 async function crawl(a, b, c, d) {
   const { site, totalPages, interval, maxRetries } = normalizeCrawlArgs(a, b, c, d);
   const siteConfig = getSiteConfig(site);
-  // 站点配置对象由 registry 复用；每轮从环境变量指定的初始端口开始，
-  // 不把上轮 405 换点后的 runtimeProxyUrl 带入下一轮。
-  delete siteConfig.runtimeProxyUrl;
-  // 每轮运行清空换点轮换记忆与节点快照：上轮试过的节点本轮允许重新尝试（WAF 封禁状态
-  // 随时间变化），快照只在构建它的一轮内被信任，防订阅变更后被旧快照锁死于假轮尽。
-  // 键统一走 rotateKey，与 trySwitchProxy 写侧一致（原写原始名/删 normalizeSite 名两链会错位——审查 #2）
-  _proxyRotate.delete(rotateKey(site));
-  if (getProxyAgents._leafCache) getProxyAgents._leafCache.delete(rotateKey(site));
-  _proxySwitchQueue.delete(rotateKey(site));
+  // 站点配置对象由 registry 复用；换点地址现由本轮 rotation 实例持有，
+  // 不再需要手动清理 siteConfig 上的残留字段——跨轮状态随实例自然消失。
+  // 每轮一个换点状态机实例：上轮试过的节点本轮允许重新尝试（WAF 封禁状态随时间变化），
+  // 快照只在本轮内被信任，防订阅变更后被旧快照锁死于假轮尽。
+  // 原三处分散的 _proxyRotate/_leafCache/_proxySwitchQueue 清理已收敛为实例生命周期。
+  const rotation = proxyRotation.createRotation(site, siteConfig, {
+    resolveProxyUrl,
+    getProxyProvider
+  });
+  registerRotation(site, rotation);
   // 清理 _proxySharedExit 中已不在启用列表的站点，避免已下线站点持续触发 proxy_shared_exit 告警（#6）
   try {
     const { parseSitesList } = require('./sites');
@@ -668,7 +634,7 @@ async function crawl(a, b, c, d) {
         log(`站点 [${site}] 已启用代理：${desensitizeProxyUrl(_proxyUrl)}`, { event: 'proxy_enabled', context: { site, proxy: desensitizeProxyUrl(_proxyUrl) }, site });
         // 多站共用同一代理出口时提示换点互踩风险：Agent 隧道已按站隔离，
         // 但共享入口的端口池可能使 A 站换点影响 B 站后续请求的出口。
-        const siteKey = rotateKey(site);
+        const siteKey = proxyRotation.rotationKey(site);
         if (!_proxySharedExit.has(_proxyUrl)) _proxySharedExit.set(_proxyUrl, new Set());
         _proxySharedExit.get(_proxyUrl).add(siteKey);
         const siblings = [..._proxySharedExit.get(_proxyUrl)].filter(s => s !== siteKey);
@@ -737,7 +703,7 @@ async function crawl(a, b, c, d) {
     const crawlPromises = [];
 
     for (let i = 0; i < pagesToCrawl; i++) {
-      crawlPromises.push(crawlPage(batchStartPage + i, siteConfig, existingIds, maxRetries));
+      crawlPromises.push(crawlPage(batchStartPage + i, siteConfig, existingIds, maxRetries, rotation));
     }
 
     const results = await Promise.all(crawlPromises);
@@ -779,14 +745,12 @@ async function crawl(a, b, c, d) {
         continue;
       }
 
-      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，并清空换点轮换记忆
-      // 与节点快照（下轮可从头再试各节点、按最新订阅重发现）
+      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，
+      // 并清空本轮换点记忆与节点快照（下一批可从头再试各节点、按最新订阅重发现）
       consecutive405 = 0;
       netFailStreak = 0;
       netFailSwitched = false;
-      _proxyRotate.delete(rotateKey(site));
-      if (getProxyAgents._leafCache) getProxyAgents._leafCache.delete(rotateKey(site));
-      _proxySwitchQueue.delete(rotateKey(site));
+      rotation.reset();
 
       if (ended) {
         batchEndReached = true;
@@ -843,7 +807,7 @@ async function crawl(a, b, c, d) {
       // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
       let sw = makeSwitchResult();
-      try { sw = await trySwitchProxy(siteConfig, 'net_fail_streak'); } catch (_) {}
+      try { sw = await rotation.switch('net_fail_streak'); } catch (_) {}
       netFailSwitched = true;
       log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched: !!sw.ok }, site });
     } else if (netFailStreak >= NET_FAIL_BREAK_THRESHOLD && netFailSwitched) {
@@ -912,6 +876,11 @@ async function crawl(a, b, c, d) {
     clearCheckpoint(site);
   }
 
+  // 本轮结束：注销并销毁换点状态机（含本站 keepAlive 隧道），
+  // 下轮以全新实例开始，不存在跨轮残留
+  unregisterRotation(site);
+  rotation.dispose();
+
   const durationMs = Date.now() - startedAt;
   const totalPersisted = totalNew - failedIds.size;
   const crawlLevel = fileWriteFailed > 0 ? 'warn' : 'info';
@@ -942,7 +911,7 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, getRotation, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
 
 
 function normalizePublishDateSafe(value) {

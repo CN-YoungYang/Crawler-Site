@@ -60,7 +60,7 @@ docker compose down
 
 ## 测试与修改要求
 
-测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 9 个测试套件。
+测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 11 个测试套件。
 
 不要手工编辑 `file/`、`logs/` 或其他运行时生成文件。修改站点时同步检查 `sites/index.js`、`crawler.js`、`README.md` 和相关测试；修改领域术语或架构决策时阅读 `CONTEXT.md` 和相关 `docs/adr/`。
 

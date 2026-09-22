@@ -113,7 +113,7 @@ const EASY_NODES = [
 ];
 
 function makeEasyHarness(targetHandler) {
-  const state = { nodeCalls: 0, targetCalls: 0, targetUrls: [] };
+  const state = { nodeCalls: 0, targetCalls: 0, targetUrls: [], proxyPorts: [] };
   const restores = [
     setEnv('PROXY_CEBTEST', 'http://easy_proxies:24000'),
     setEnv('EASY_PROXIES_CONTROLLER', 'http://controller.test:9091'),
@@ -129,6 +129,10 @@ function makeEasyHarness(targetHandler) {
     if (target.endsWith('/api/subscription/refresh')) return { data: {}, status: 204 };
     state.targetCalls++;
     state.targetUrls.push(target);
+    // 记录本次业务请求实际使用的代理出口端口：换点地址属于 proxyRotation 的实现，
+    // 不在 siteConfig 上，故以「真的走了哪个端口」这一行为作为断言依据。
+    const agentProxyUrl = config && config.httpAgent && config.httpAgent.proxy && config.httpAgent.proxy.href;
+    if (agentProxyUrl) state.proxyPorts.push(new URL(agentProxyUrl).port);
     return targetHandler(state, target, config);
   });
   const crawler = freshCrawler();
@@ -174,7 +178,8 @@ async function mainGate() {
         assert.strictEqual(result.failed, false, '第三个 easy_proxies 端口成功后不应标记失败');
         assert.strictEqual(harness.state.targetCalls, 3, '三个端口各尝试一次');
         assert.strictEqual(harness.state.nodeCalls, 1, '节点列表只需查询一次');
-        assert.strictEqual(harness.config.runtimeProxyUrl, 'http://easy_proxies:24002/');
+        // 行为断言：三次尝试必须分别落在 24000 → 24001 → 24002，即真的换了出口端口
+        assert.deepStrictEqual(harness.state.proxyPorts, ['24000', '24001', '24002'], '三次尝试应依次使用三个不同节点端口');
       } finally {
         harness.done();
       }
