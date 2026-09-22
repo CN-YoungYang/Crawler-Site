@@ -32,7 +32,7 @@ npm install
 
 ## 使用方法
 
-正式部署（Docker Compose）请先阅读：[DEPLOY.md](DEPLOY.md)。
+正式部署（Docker Compose）请先阅读：[DEPLOY.md](DEPLOY.md)。其中「0. 选择部署形态」说明**要不要部署 easy_proxies 代理**——本地不部署代理时，必须按 3.3 节显式清空 `CEB_PROXY_URL`，否则容器仍会使用 Compose 的默认兜底地址并产生无谓失败。
 
 ### 本地（宿主机）
 
@@ -226,8 +226,9 @@ crawler/
 │   ├── _easy_proxies.js  # 默认代理提供方：管理 API、健康节点发现、多端口轮换与订阅刷新
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 9 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 11 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
+│   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
 │   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
 ├── docker-compose.yml    # 双服务 easy_proxies(默认启用，多端口业务端口 24000+，管理 API 9091) + crawler 一容器多站点并发编排

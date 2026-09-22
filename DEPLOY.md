@@ -7,6 +7,27 @@
 - `easy_proxies`：为 `ceb` 提供多端口代理。管理 API 使用容器网络内的 `9091`，代理端口范围为 `24000-24200`，默认不暴露到宿主机。
 - `crawler`：由本地 `Dockerfile` 构建，抓取 `yfbzb`/`ceb`，生成 Excel 和 HTML 报告，并在 `HTTP_PORT`（默认 `8080`）提供静态访问。
 
+## 0. 选择部署形态
+
+**先决定要不要部署 `easy_proxies`**，两条路径的准备步骤不同。
+
+| 形态 | 适用场景 | 影响 |
+| --- | --- | --- |
+| **A. 完整部署**（含代理） | `ceb` 在固定出口 IP 下被 WAF 拦截（持续 405） | 需要代理订阅或节点文件；`ceb` 可换 IP |
+| **B. 不用代理**（直连） | 本地试用、只在宿主机跑、`ceb` 直连可用、或无代理订阅 | 两个站点均直连；`ceb` 若被 WAF 拦则取不到数据 |
+
+**形态 B 是受支持的正常配置，不是降级或故障。** 选它请直接跳到「B. 不用代理的部署」，并特别注意 `CEB_PROXY_URL` 必须**显式清空**（原因见该节）。
+
+形态 B 下你会周期性看到这些日志，**属于预期行为，无需排查**：
+
+```text
+easy_proxies 没有可用多端口节点 [ceb] empty-pool
+easy_proxies 节点查询失败 [ceb] api-down：management unavailable
+easy_proxies 节点池本轮已轮尽 [ceb] dual405
+```
+
+它们表示「没有代理可用，本轮直连」——即安全降级路径。只有在形态 A 下出现，才需要按第 12 节排查。
+
 ## 1. 准备环境
 
 部署机需要：
@@ -70,6 +91,13 @@ TZ=Asia/Shanghai
 HTTP_PORT=8080
 HTTP_ENABLED=true
 ```
+
+> 若采用**形态 B（不用代理）**，追加三行清空代理配置（原因见 3.3 节）：
+> ```dotenv
+> CEB_PROXY_URL=
+> PROXY_CEB=
+> EASY_PROXIES_CONTROLLER=
+> ```
 
 `CRON_EXPR` 为空时，启动后执行一次并保持容器运行。生产环境可设置每天定时，例如：
 
@@ -137,6 +165,49 @@ EASY_PROXIES_REFRESH_COOLDOWN=600
 ```
 
 不要把订阅地址、密码、节点文件提交到仓库。`.env`、`config.yaml`、`nodes.txt` 和运行时节点文件已加入忽略规则。
+
+### 3.3 B. 不用代理的部署
+
+不部署 `easy_proxies` 时，**不能只是「不配置」**——`docker-compose.yml` 对 `CEB_PROXY_URL` 有硬编码兜底：
+
+```yaml
+- CEB_PROXY_URL=${CEB_PROXY_URL:-http://easy_proxies:24000}
+```
+
+即 `.env` 未设置时，容器内仍会得到 `http://easy_proxies:24000`。由于该服务不存在，`ceb` 的每页请求都会先尝试一个不可达的代理再降级，产生无谓的失败与重试。**必须显式清空**：
+
+```dotenv
+CEB_PROXY_URL=
+PROXY_CEB=
+EASY_PROXIES_CONTROLLER=
+```
+
+`crawler.js#resolveProxyUrl` 会以 `trim()` 过滤空串，因此空值等价于「直连」，这是干净的关闭方式。
+
+同时**注释掉 Compose 中的 `easy_proxies` 服务**（或删除该服务定义），并移除 `crawler` 的 `depends_on`：
+
+```yaml
+services:
+  # easy_proxies:            # ← 不部署时整段注释
+  #   image: ghcr.io/jasonwong1991/easy_proxies:latest
+  #   ...
+
+  crawler:
+    # depends_on:            # ← 一并移除，否则 Compose 会因缺少被依赖服务而报错
+    #   easy_proxies:
+    #     condition: service_started
+```
+
+改完后启动流程简化为：
+
+```bash
+docker compose up -d --build
+docker compose logs -f crawler
+```
+
+此时 `easy_proxies/config.yaml` 与 `nodes.txt` 都不需要创建，第 3.2 节可整节跳过。
+
+**验证直连生效**：日志中不应再出现 `已启用代理：http://easy_proxies:24000`。若仍出现，说明 `CEB_PROXY_URL` 未被清空（检查 `.env` 是否真的生效，可对照 `docker compose config` 展开结果）。
 
 ## 4. 启动前检查
 
@@ -367,20 +438,34 @@ docker compose logs --tail=200 crawler
 
 ### easy_proxies 没有可用节点
 
+> ⚠️ **先确认你的部署形态**：若按「0. 选择部署形态」用的是**形态 B（不用代理）**，本节不适用——那些日志是预期的安全降级，无需排查。以下仅针对**形态 A**。
+
 检查 `easy_proxies/config.yaml` 是否存在、订阅地址是否可访问（或 `nodes_file` 是否存在）、管理监听是否为 `0.0.0.0:9091`，再查看：
 
 ```bash
 docker compose logs --tail=200 easy_proxies
 ```
 
+若 crawler 日志出现 `auth-failed：unauthorized`，说明管理面设置了密码但 `EASY_PROXIES_PASSWORD` 未填写或不匹配。两者需一致（见 3.2 节）。
+
+**注意日志顺序会误导**：crawler 会先用上一轮的节点快照完成若干次「已切换节点」记录，随后才报 `proxy_pool_empty` / `management unavailable`。因此**看到「已切换节点」不代表代理真的可用**——判断标准是管理 API 是否可达（`/api/nodes` 是否返回节点），而非切换日志是否出现。
+
 ### CEB 持续 405
 
-确认业务代理端口和管理端口没有写反：
+先区分两种情形：
+
+**形态 A（已部署代理）**——确认业务代理端口和管理端口没有写反：
 
 ```dotenv
 CEB_PROXY_URL=http://easy_proxies:24000
 EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
 ```
+
+**形态 B（不用代理）**——`ceb` 直连被阿里云 WAF 按 IP 段拦截是本项目已知的固有限制（见 `docs/adr/0002`）。此时有三个选择：
+
+1. 部署 `easy_proxies` 改为形态 A（推荐，这是绕过的根治手段）；
+2. 设 `SITES=yfbzb` 只抓直连可用的站点；
+3. 接受 `ceb` 无数据，但保留站点配置。
 
 管理面不可达或节点池为空时 crawler 会安全降级，但 CEB 可能无法取得数据。
 
@@ -410,11 +495,26 @@ docker compose up -d --force-recreate crawler
 
 ## 13. 上线检查清单
 
-- [ ] `.env`、`easy_proxies/config.yaml`、`nodes.txt` 未提交 Git；
-- [ ] `9091` 和 `24000-24200` 未暴露到公网；
+**通用**
+
+- [ ] `.env` 已创建且未提交 Git；
 - [ ] 防火墙只开放必要的 HTTP/HTTPS 端口；
 - [ ] 订阅地址和管理密码没有写入日志、截图或工单；
 - [ ] `file/`、`logs/` 已纳入备份；
 - [ ] `HTTP_ENABLED=true`，`/health` 返回 200；
 - [ ] `TZ=Asia/Shanghai` 未被覆盖；
-- [ ] 首次上线已查看 crawler 和 easy_proxies 日志。
+- [ ] 首次上线已查看 crawler 日志。
+
+**形态 A（含 easy_proxies）**
+
+- [ ] `easy_proxies/config.yaml` 与 `nodes.txt` 未提交 Git；
+- [ ] `9091` 和 `24000-24200` 未暴露到公网；
+- [ ] crawler 日志出现 `已启用代理`，且管理 API 可返回节点；
+- [ ] 已查看 easy_proxies 日志，确认无认证失败。
+
+**形态 B（不用代理）**
+
+- [ ] `.env` 中 `CEB_PROXY_URL` / `PROXY_CEB` / `EASY_PROXIES_CONTROLLER` 已**显式清空**（非省略）；
+- [ ] Compose 中 `easy_proxies` 服务与 `crawler.depends_on` 已注释或删除；
+- [ ] crawler 日志中**没有** `已启用代理`；
+- [ ] 已知悉 `ceb` 直连被 WAF 拦时取不到数据，且日志中的 `proxy_pool_empty` 属预期降级。
