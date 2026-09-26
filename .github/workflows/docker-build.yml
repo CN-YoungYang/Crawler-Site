@@ -3,7 +3,6 @@ name: docker-build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -12,8 +11,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
@@ -27,30 +28,27 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: 提取元数据
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/crawler
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
       - name: 门禁：npm test
         run: |
           npm ci
           npm test
 
-      - name: 构建并推送
+      - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+
+          # 推送到 Docker Hub
           push: true
+
+          # 多架构
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+
+          # 只保留 latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/crawler:latest
+
+          # GitHub Actions 构建缓存
           cache-from: type=gha
           cache-to: type=gha,mode=max
