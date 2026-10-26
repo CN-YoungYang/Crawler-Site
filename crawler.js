@@ -314,6 +314,8 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   let method = String(siteConfig.method || 'GET').toUpperCase();
   let triedFallback = false;
   let triedSwitch = false;
+  // WAF 挑战只解一次：求解失败直接按失败页返回，避免未解盾重试把出口 IP 打成 405
+  let challengeTried = false;
 
   // 站点级请求前抖动（风控敏感站如 ceb）：crawler 批次间隔为 batch 之间，页内再加随机延迟
   async function maybeThrottle() {
@@ -361,6 +363,41 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         }
       } else {
         response = await axios.get(url, { timeout, headers, ...axiosProxyOpts });
+      }
+
+      // 站点声明的 WAF 挑战（如阿里云 acw）：在沙箱内求解签名 URL 后带 cookie 重放一次。
+      // 关键：求解失败必须记为失败页——否则盾页会被 parse 成「0 行」，
+      // crawl() 走 !hasNewDataInBatch 早停，表现为「新增 0 条」的静默失败。
+      if (!challengeTried && siteConfig.challenge &&
+          typeof siteConfig.challenge.detect === 'function' &&
+          siteConfig.challenge.detect(response)) {
+        challengeTried = true;
+        let solved = null;
+        try {
+          solved = await siteConfig.challenge.solve(response, { url });
+        } catch (e) {
+          log(`第 ${pageNo} 页 WAF 挑战求解异常：${e.message}`, { level: 'error', event: 'waf_challenge_error', context: { page: pageNo, site: siteName, error: e.message }, site: siteName });
+        }
+        if (!solved || !solved.url) {
+          log(`第 ${pageNo} 页触发 WAF 挑战，求解失败`, { level: 'error', event: 'waf_challenge_unsolved', context: { page: pageNo, site: siteName, status: response.status }, site: siteName });
+          return { pageData: [], failed: true, status: response.status, shieldType: 'acw' };
+        }
+        const replayHeaders = { ...headers, ...(solved.headers || {}) };
+        try {
+          response = await axios.get(solved.url, { timeout, headers: replayHeaders, ...axiosProxyOpts });
+        } catch (e) {
+          // 重放拿到 HTTP 状态（尤其 405）= 盾未通过；交回 405/POST 流程只会多打一发并延长封禁。
+          // 无 status 的网络错误仍抛回外层，走既有的重试/换点/网络连败熔断。
+          const replayStatus = e.response && e.response.status;
+          if (replayStatus === undefined || replayStatus === null) throw e;
+          log(`第 ${pageNo} 页 WAF 挑战重放失败（status=${replayStatus}）`, { level: 'error', event: 'waf_challenge_replay_failed', context: { page: pageNo, site: siteName, status: replayStatus }, site: siteName });
+          return { pageData: [], failed: true, status: replayStatus, shieldType: 'acw' };
+        }
+        if (siteConfig.challenge.detect(response)) {
+          log(`第 ${pageNo} 页 WAF 挑战重放后仍被拦截`, { level: 'error', event: 'waf_challenge_blocked', context: { page: pageNo, site: siteName, status: response.status }, site: siteName });
+          return { pageData: [], failed: true, status: response.status, shieldType: 'acw' };
+        }
+        log(`第 ${pageNo} 页已解 WAF 挑战并重放`, { event: 'waf_challenge_solved', context: { page: pageNo, site: siteName }, site: siteName });
       }
 
       // 优先使用站点自定义 parse 接管整页解析
@@ -680,6 +717,8 @@ async function crawl(a, b, c, d) {
   const failedIds = new Set();
   let endReached = false;
   let consecutive405 = 0;
+  // WAF 挑战连续求解失败页数：盾页不可解时换 IP 也无济于事，连续 2 页即熔断，避免空转烧 IP。
+  let consecutiveShield = 0;
   // 双 405 触发的成功换点次数（单轮运行内）：换点成功即重置 consecutive405 给新出口观察页
   let proxy405Switches = 0;
   // 网络级连败（ECONNRESET/超时等无 status 失败）：代理站点达阈值换 IP，再连败至翻倍熔断；成功/边界页清零。
@@ -740,16 +779,18 @@ async function crawl(a, b, c, d) {
             consecutive405++;
           }
         }
-        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status, proxySwitched: !!results[i].proxySwitched, proxyExhausted: !!results[i].proxyExhausted }, site });
+        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status, proxySwitched: !!results[i].proxySwitched, proxyExhausted: !!results[i].proxyExhausted, shield: !!results[i].shieldType }, site });
         // 网络级失败（无 status：ECONNRESET/超时/TLS 断开）计数，代理站点达阈值换 IP、再连败熔断；
         // 有 status 的失败（403/405 等已到服务器）说明链路连通，不计入
         if (status === undefined || status === null) netFailStreak++;
+        if (results[i].shieldType) consecutiveShield++;
         continue;
       }
 
       // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，
       // 并清空本轮换点记忆与节点快照（下一批可从头再试各节点、按最新订阅重发现）
       consecutive405 = 0;
+      consecutiveShield = 0;
       netFailStreak = 0;
       netFailSwitched = false;
       rotation.reset();
@@ -800,8 +841,12 @@ async function crawl(a, b, c, d) {
       }
     }
 
-    // 双 405 熔断：换点轮换耗尽后仍连续 2 页 GET→POST 均 405，判定为站点级拦截，避免 100 页空转
-    if (consecutive405 >= 2) {
+    // WAF 挑战熔断：盾页连续 2 页不可解，换 IP 也只会拿到同样的盾，避免烧掉整池出口
+    if (consecutiveShield >= 2) {
+      log(`连续 ${consecutiveShield} 页 WAF 挑战求解失败，判定盾页不可解，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      shouldStopCrawling = true;
+      retryFromPage = batchStartPage;
+    } else if (consecutive405 >= 2) {
       log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
       retryFromPage = batchStartPage;

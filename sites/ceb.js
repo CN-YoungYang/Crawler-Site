@@ -3,6 +3,7 @@
 // 风控敏感：VAPTCHA 已在当前页面注释但仍有 JSESSIONID/acw_tc，禁止并发，必须串行+抖动
 
 const { shanghaiDateStr } = require('../utils');
+const aliyunWaf = require('./_aliyun_waf');
 
 function formatDate(d) {
   if (d instanceof Date) {
@@ -157,6 +158,12 @@ module.exports = {
   // 405 容错：GET 被 WAF 拒时自动降级为 POST
   method: 'GET',
   fallbackOn405: true,
+  // 阿里云 WAF acw 挑战：干净出口首次请求返回 200 盾页，
+  // 必须在沙箱内求解签名 URL 后重放；求解失败由 crawler 记为失败页并熔断。
+  challenge: {
+    detect: response => aliyunWaf.isChallenge(response),
+    solve: (response, { url }) => aliyunWaf.solve(response, url)
+  },
   // 代理换 IP 绕过 WAF：easy_proxies 多端口管理 API 在双 405 后选择下一个独立节点端口。
   // 例：CEB_PROXY_URL=http://easy_proxies:24000，EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
   proxyProvider: 'easy_proxies',
