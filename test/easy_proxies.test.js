@@ -1,6 +1,6 @@
 // 边界：easy_proxies 管理 API 契约、健康节点端口轮换与 CEB 双 405 重试。
 const assert = require('assert');
-const { mockAxios, freshCrawler } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
 
 function setEnv(name, value) {
   const previous = process.env[name];
@@ -274,12 +274,18 @@ async function testCebDouble405RetriesCurrentPage() {
   }
 }
 
-async function main() {
+async function run() {
   await testNodeParsingAndRotation();
   await testAuthenticationAndRefresh();
   await testSafeDegradation();
   await testCebDouble405RetriesCurrentPage();
   console.log('easy_proxies 节点契约/端口轮换/认证降级/CEB 双 405 重试：通过');
+}
+
+// 这些用例直接调用 crawlPage/switchNode，日志会落到 cwd 下的 logs/<site>/；
+// 不隔离就会写进仓库真实的 logs/ceb，看起来像生产故障（2026-08/09 的假 405 日志即由此产生）。
+async function main() {
+  await withTempCwd(() => run());
 }
 
 main().catch(error => {

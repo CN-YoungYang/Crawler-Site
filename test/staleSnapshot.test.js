@@ -9,7 +9,7 @@
 //
 // 接缝：sites/_easy_proxies.js#switchNode 的返回值（提供方与编排层之间的契约）。
 const assert = require('assert');
-const { mockAxios, freshCrawler } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
 
 const NODES = [
   { tag: 'N1', name: '节点一', port: 24000, available: true, initial_check_done: true },
@@ -27,7 +27,7 @@ function setEnv(name, value) {
   };
 }
 
-async function main() {
+async function run() {
   // 管理 API 始终不可达，逼出「退用快照」这条路径。
   let apiCalls = 0;
   const restoreAxios = mockAxios(url => {
@@ -109,6 +109,11 @@ async function main() {
     restoreAxios();
     restores.reverse().forEach(fn => fn());
   }
+}
+
+// switchNode 会写 logs/ceb；切到临时 cwd，避免测试日志混入仓库真实日志。
+async function main() {
+  await withTempCwd(() => run());
 }
 
 main().catch(error => {
