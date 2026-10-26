@@ -7,7 +7,7 @@
 - 每个功能一个目录：`.scratch/<feature-slug>/`
 - 规格说明为 `.scratch/<feature-slug>/spec.md`
 - 实现任务单为 `.scratch/<feature-slug>/issues/<NN>-<slug>.md`，从 `01` 起编号，不要合并成单个 tickets 文件
-- 分诊状态写在每个任务单文件顶部附近的 `Status:` 行
+- 分诊状态写在每个任务单文件顶部附近的 `Status:` 行（角色字符串见 `triage-labels.md`）
 - 评论和讨论追加到文件末尾的 `## Comments` 标题下
 
 ## 技能要求发布到 Issue 追踪器时

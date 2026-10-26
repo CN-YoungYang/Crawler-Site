@@ -69,8 +69,12 @@ docker compose down
 
 ### 问题追踪器（Issue）
 
-本仓库的问题单和规格说明记录为 `.scratch/<feature>/` 下的 Markdown 文件。详见 `docs/agents/issue-tracker.md`。
+问题单和规格说明落在 `.scratch/<feature>/` 的本地 Markdown；记录或查找前读 `docs/agents/issue-tracker.md`。
+
+### 分诊标签
+
+移动问题单的分诊状态前，读 `docs/agents/triage-labels.md` 取角色对应的 `Status:` 字符串。
 
 ### 领域文档
 
-本仓库采用单一上下文（single-context）：根目录 `CONTEXT.md` 与 `docs/adr/`。详见 `docs/agents/domain.md`。
+单一上下文：根目录 `CONTEXT.md`、`docs/adr/`。读取约定见 `docs/agents/domain.md`。
