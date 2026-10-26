@@ -163,9 +163,9 @@ server {
 1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点警告后跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
-   - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
+   - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
@@ -210,7 +210,7 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies 多端口换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；代理隧道按站隔离），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies 多端口换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；代理隧道按站隔离）+ 阿里云 acw 盾页沙箱求解（`sites/_aliyun_waf.js`），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 
@@ -224,10 +224,12 @@ crawler/
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/parseSitesList()/listEnabledSites()（仅 yfbzb/ceb）
 │   ├── _easy_proxies.js  # 默认代理提供方：管理 API、健康节点发现、多端口轮换与订阅刷新
+│   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
-│   └── ceb.js            # 实站配置：axios + 代理换 IP/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 12 个零依赖 Node 测试套件与测试夹具
+│   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
+├── test/                 # 13 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
+│   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
 │   ├── staleSnapshot.test.js # 陈旧快照换点须标注 source=snapshot
 │   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
@@ -258,7 +260,7 @@ crawler/
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
-- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等），`ceb` 已默认经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用 多端口换 IP（管理 API `9091`，空节点池/管理面不可达时安全降级）；其余站点直连。
+- 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等）：`ceb` 已内置阿里云 acw 盾页求解（`sites/_aliyun_waf.js`，vm 沙箱、5s 超时），并经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用多端口换 IP 兜底（管理 API `9091`，空节点池/管理面不可达时安全降级）；挑战连续 2 页不可解时熔断，不空转烧 IP。其余站点直连。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会警告后跳过，单站点 `SITE=<未知>` 则快速失败。
 - 智能体工作流说明见 `AGENTS.md`，问题记录规则见 `docs/agents/issue-tracker.md`。
