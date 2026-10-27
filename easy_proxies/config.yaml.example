@@ -61,5 +61,13 @@ subscriptions:
   # 订阅地址含密钥，只写进被 gitignore 的 config.yaml，不要提交仓库。
   # - "https://your-host.example/clash_fast.yaml"
 
-# 也可以改为手工节点文件；每行一个代理 URI。
+# 固定节点：可与 subscriptions 并存，订阅刷新只替换订阅节点、保留这些内联节点。
+# 适合「几个固定兜底出口 + 动态订阅」；需要固定端口时给节点写 port。
+# nodes:
+#   - name: "固定-1"
+#     uri: "ss://...@1.2.3.4:8388#固定-1"
+#     port: 24000
+
+# nodes_file 只作为订阅结果的写回缓存。**不要**把固定节点写进 nodes.txt：
+# 有 subscriptions 时 easy_proxies 不读该文件，且每次刷新都会覆盖它。
 nodes_file: nodes.txt

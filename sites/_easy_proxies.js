@@ -4,6 +4,7 @@ const axios = require('axios');
 const { log } = require('../log');
 
 const REQUEST_TIMEOUT = 2000;
+const DEFAULT_REFRESH_TIMEOUT_MS = 60000;
 const DEFAULT_CONTROLLER = 'http://easy_proxies:9091';
 let refreshAt = 0;
 let refreshPromise = null;
@@ -42,8 +43,11 @@ function controllerBases(siteConfig, proxyUrl) {
     addBase(bases, `${proxy.protocol}//${host}:9091`);
   } catch (_) {}
 
-  addBase(bases, DEFAULT_CONTROLLER);
-  addBase(bases, 'http://127.0.0.1:9091');
+  // 兜底只在「完全推导不出管理地址」时使用。
+  // 曾经无条件追加 DEFAULT_CONTROLLER 与 127.0.0.1:9091，而失败日志只保留最后一个错误，
+  // 于是真实原因（如 easy_proxies:9091 的 500）永远被「connect ECONNREFUSED 127.0.0.1:9091」
+  // 盖掉——排查被引向「管理面掉线」，实际只有刷新接口失败（2026-10-27 生产日志）。
+  if (!bases.length) addBase(bases, DEFAULT_CONTROLLER);
   return bases;
 }
 
@@ -73,12 +77,12 @@ async function login(base) {
   return token;
 }
 
-async function request(base, method, endpoint, data) {
+async function request(base, method, endpoint, data, { timeout = REQUEST_TIMEOUT } = {}) {
   const url = `${base}${endpoint}`;
   const send = async () => {
     const token = authTokens.get(base);
     const config = {
-      timeout: REQUEST_TIMEOUT,
+      timeout,
       proxy: false,
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     };
@@ -122,10 +126,10 @@ function normalizeNodes(rawNodes) {
 }
 
 // 返回 { nodes, controller, source }：
-// - source: 'snapshot' 表示本次未触达管理 API，直接采用了上一轮的节点快照（零请求短路）；
+// - source: 'snapshot' 表示本次未查询管理 API，直接采用了本轮更早一次换点留下的节点快照（零请求短路）；
 // - source: 'api'      表示本次真的查询了 /api/nodes。
 // 区分两者是必要的：快照路径下「已切换节点」只说明端口号变了，
-// 并不证明该端口背后有可用出口——管理面可能早已不可达（陈旧快照）。
+// 并不证明该端口背后有可用出口——这次换点根本没有向管理面核对过。
 async function fetchNodes(siteConfig, proxyUrl, cached) {
   if (cached && Array.isArray(cached.nodes) && cached.nodes.length) {
     return {
@@ -135,7 +139,7 @@ async function fetchNodes(siteConfig, proxyUrl, cached) {
     };
   }
 
-  let lastError;
+  const failures = [];
   for (const base of controllerBases(siteConfig, proxyUrl)) {
     try {
       const response = await request(base, 'GET', '/api/nodes');
@@ -143,10 +147,15 @@ async function fetchNodes(siteConfig, proxyUrl, cached) {
       if (!Array.isArray(nodes)) throw new Error('easy_proxies /api/nodes 响应缺少 nodes 数组');
       return { nodes: normalizeNodes(nodes), controller: base, source: 'api' };
     } catch (error) {
-      lastError = error;
+      failures.push(describeFailure(base, error));
     }
   }
-  throw lastError || new Error('easy_proxies 管理 API 不可达');
+  // 逐条透出而非只留最后一个：兜底地址的 ECONNREFUSED 会盖掉真实原因。
+  const error = new Error(failures.length
+    ? `easy_proxies 管理 API 不可达：${summarizeFailures(failures)}`
+    : 'easy_proxies 管理 API 不可达（未配置可用的管理地址）');
+  error.attempts = failures;
+  throw error;
 }
 
 function portFromProxyUrl(proxyUrl) {
@@ -178,10 +187,11 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
   try {
     snapshot = await fetchNodes(siteConfig, proxyUrl, cached);
   } catch (error) {
+    const attempts = Array.isArray(error.attempts) ? error.attempts : [];
     log(`easy_proxies 节点查询失败 [${site}] ${reason}：${error.message}`, {
       level: 'warn',
       event: 'proxy_nodes_failed',
-      context: { site, reason, error: error.message },
+      context: { site, reason, error: error.message, attempts },
       site
     });
     return { noop: true };
@@ -230,10 +240,15 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
 
   const newTried = [...triedNames, next.tag];
   const nextProxyUrl = proxyUrlForPort(proxyUrl, next.port);
-  // 快照路径下必须显式标注：本次换点未经验证（管理面未触达），
+  // 快照路径下必须显式标注：本次换点未经验证，
   // 调用方据此提示「这只是端口号变了，不代表出口可用」。
+  // 措辞两条硬约束：
+  // 1) 必须写「本轮早先」：快照属于本轮 rotation 实例，成功页会 reset() 清空，
+  //    不可能跨轮残留。写成「上一轮」会让人误判管理面早已不通（2026-10-27 生产日志实见）。
+  // 2) 不得写「管理面未触达」：管理面通常是通的，只是这次没查；那句话会把人引向
+  //    「管理面掉线」这个错误方向，与 stale 的真实语义（未核对、未验证）根本不是一回事。
   if (source === 'snapshot') {
-    log(`easy_proxies 已切换节点（未验证，管理面未触达）[${site}] ${reason}：${nodeLabel(current) || `port:${currentPort || '?'}`} → ${nodeLabel(next)}，节点列表取自上一轮快照，出口可用性未经确认`, {
+    log(`easy_proxies 已切换节点（未验证，沿用本轮早先快照）[${site}] ${reason}：${nodeLabel(current) || `port:${currentPort || '?'}`} → ${nodeLabel(next)}，本次未再查询管理面，出口可用性未经确认`, {
       level: 'warn',
       event: 'proxy_switched_stale_snapshot',
       context: { site, reason, from: nodeLabel(current), to: nodeLabel(next), port: next.port, tried: newTried.length, leaves: nodes.length },
@@ -258,6 +273,26 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
     currentTag: next.tag,
     controller: snapshot.controller
   };
+}
+
+// 订阅刷新超时：easy_proxies 的 RefreshNowContext 是同步等待（要等订阅拉取 + 健康检查
+// 跑完，其配置默认 timeout 30s、health_check_timeout 60s），2s 的通用管理面超时永远等不到
+// 结果，表现为「配了订阅却每轮刷新失败」。故单独放宽为 60s，可用环境变量覆盖。
+// 与 refreshCooldownMs() 一样每次读取 env：便于测试与运行时改配置，不在模块加载时冻结。
+function refreshTimeoutMs() {
+  const raw = process.env.EASY_PROXIES_REFRESH_TIMEOUT;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_REFRESH_TIMEOUT_MS;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    log(`EASY_PROXIES_REFRESH_TIMEOUT=${raw} 非法（需正数秒），已回退 ${DEFAULT_REFRESH_TIMEOUT_MS / 1000}s`, {
+      level: 'warn',
+      event: 'proxy_refresh_timeout_invalid',
+      context: { raw },
+      site: 'easy_proxies'
+    });
+    return DEFAULT_REFRESH_TIMEOUT_MS;
+  }
+  return seconds * 1000;
 }
 
 function refreshCooldownMs() {
@@ -286,6 +321,44 @@ function desensitizeErrorText(text) {
     .replace(/\[[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\](?::\d+)?/gi, '***');
 }
 
+// 管理地址本身也要脱敏：配置或环境变量里可能带 user:pass@ 与查询参数。
+function sanitizeBase(base) {
+  try {
+    const url = new URL(base);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/, '');
+  } catch (_) {
+    return String(base || '');
+  }
+}
+
+// 把一次管理面失败归一成可逐条透出的结构 { base, status, code, detail }。
+// 只读 error.message 会丢掉上游真正的原因：easy_proxies 在拒绝刷新时返回
+// 500 {"error":"no subscription URLs configured"}，axios 的 message 只有「status code 500」。
+// 响应体是自由文本，统一走 desensitizeErrorText（上游会内嵌订阅 URL 与节点 IP）。
+function describeFailure(base, error) {
+  const response = (error && error.response) || {};
+  const body = response.data;
+  const bodyError = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
+  return {
+    base: sanitizeBase(base),
+    status: response.status,
+    code: (error && error.code) || '',
+    detail: desensitizeErrorText(bodyError || (error && error.message) || '未知错误')
+  };
+}
+
+// 逐条列出所有候选地址的失败。只留最后一个 error 会让排在末尾的兜底地址
+// 掩盖真实原因（见 controllerBases 注释）。
+function summarizeFailures(failures) {
+  return failures
+    .map(a => `${a.base}（${[a.status ? `HTTP ${a.status}` : '', a.code, a.detail].filter(Boolean).join(' ')}）`)
+    .join('；');
+}
+
 // 读取订阅状态（节点数 / 订阅侧错误）。这是「刷新是否真的换了节点」的唯一线索：
 // easy_proxies 在订阅拉取失败、回退旧缓存时同样返回 200，只看刷新接口的 200 会永久静默。
 // 状态接口不可达（旧版本、管理面半死）时返回 null，绝不影响刷新本身的成败判定。
@@ -312,10 +385,10 @@ async function refreshProviders({ site = '', reason = '', siteConfig, proxyUrl }
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
-    let lastError;
+    const failures = [];
     for (const base of controllerBases(siteConfig, proxyUrl)) {
       try {
-        await request(base, 'POST', '/api/subscription/refresh');
+        await request(base, 'POST', '/api/subscription/refresh', undefined, { timeout: refreshTimeoutMs() });
         refreshAt = Date.now();
         // 刷新返回 200 只说明接口被受理，不代表拿到新节点：读状态把「实际节点数」带进日志。
         const status = await readSubscriptionStatus(base);
@@ -339,13 +412,28 @@ async function refreshProviders({ site = '', reason = '', siteConfig, proxyUrl }
         });
         return true;
       } catch (error) {
-        lastError = error;
+        failures.push(describeFailure(base, error));
       }
     }
-    log(`easy_proxies 订阅刷新失败 [${site}] ${reason}：${lastError ? lastError.message : '管理 API 不可达'}`, {
+    // 冷却只给「真的可能已被受理」的失败：ECONNABORTED 说明 POST 已送达、服务端在跑；
+    // 而 500/ECONNREFUSED 是明确拒绝或没连上，服务端什么都没做，写冷却反而会掩盖问题。
+    // 判据按「是否存在至少一个超时」逐地址判断——曾经是任一地址超时就把整轮当受理，
+    // 另一个地址明明回了 500（明确拒绝）也会被当成「可能仍在刷新」而进入冷却。
+    const timedOut = failures.some(a => a.code === 'ECONNABORTED');
+    if (timedOut) {
+      refreshAt = Date.now();
+      log(`easy_proxies 订阅刷新超时 [${site}] ${reason}（${refreshTimeoutMs() / 1000}s）：${summarizeFailures(failures)}；easy_proxies 侧可能仍在刷新，本轮沿用现有节点，${Math.round(refreshCooldownMs() / 1000)}s 内不再重试`, {
+        level: 'warn',
+        event: 'proxy_provider_refresh_timeout',
+        context: { site, reason, timeoutMs: refreshTimeoutMs(), attempts: failures },
+        site
+      });
+      return false;
+    }
+    log(`easy_proxies 订阅刷新失败 [${site}] ${reason}：${failures.length ? summarizeFailures(failures) : '未配置可用的管理地址'}`, {
       level: 'warn',
       event: 'proxy_provider_refresh_failed',
-      context: { site, reason },
+      context: { site, reason, attempts: failures },
       site
     });
     return false;

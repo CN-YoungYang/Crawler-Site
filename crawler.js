@@ -138,8 +138,9 @@ function getProxyAgents(siteConfig, targetUrl, site, overrideProxyUrl) {
   }
 }
 
-// makeSwitchResult 收敛于 proxyRotation.js（与换点结果同源，避免两处重复）
+// makeSwitchResult / staleNote 收敛于 proxyRotation.js（与换点结果同源，避免多处重复）
 const makeSwitchResult = proxyRotation.makeSwitchResult;
+const staleNote = proxyRotation.staleNote;
 
 // 双 405/网络连败的秒级换 IP：通过 easy_proxies 控制面切换多端口节点，
 // 也可经 siteConfig.switchProxy 按站覆盖；easy_proxies 知识收敛于 sites/_easy_proxies.js。
@@ -471,16 +472,14 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
             log(`第 1 页在所有节点上均被拦（双 405），判定出口全被拦截，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, status: errStatus, site: siteName }, site: siteName });
             return { pageData: [], failed: true, status: errStatus, proxyExhausted: true, gateAbort: true };
           }
-          const staleProbe = sw.stale ? '（未验证，取自上一轮快照）' : '';
-          log(`第 1 页双 405 已换 IP（${sw.from} → ${sw.to}）${staleProbe}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName, stale: !!sw.stale }, site: siteName });
+          log(`第 1 页双 405 已换 IP（${sw.from} → ${sw.to}）${staleNote(sw.stale)}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName, stale: !!sw.stale }, site: siteName });
           await new Promise(r => setTimeout(r, backoffDelay(0)));
           continue;
         }
         // 换点后重置重试该页（不限于第1页），避免数据丢失：成功换点立即重放当前页
         if (sw.ok && !triedSwitch) {
           triedSwitch = true;
-          const staleNote = sw.stale ? '（未验证，节点列表取自上一轮快照，管理面未触达）' : '';
-          log(`第 ${pageNo} 页双 405 已换 IP，立即重试该页${staleNote}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName, stale: !!sw.stale }, site: siteName });
+          log(`第 ${pageNo} 页双 405 已换 IP，立即重试该页${staleNote(sw.stale)}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName, stale: !!sw.stale }, site: siteName });
           await new Promise(r => setTimeout(r, backoffDelay(0)));
           continue;
         }
@@ -502,7 +501,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
               log(`第 1 页在所有节点上均网络失败，判定出口全部不可用，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, site: siteName }, site: siteName });
               return { pageData: [], failed: true, gateAbort: true };
             }
-            log(`第 1 页网络失败已换 IP（${sw2.from} → ${sw2.to}）${sw2.stale ? '（未验证，取自上一轮快照）' : ''}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName, stale: !!sw2.stale }, site: siteName });
+            log(`第 1 页网络失败已换 IP（${sw2.from} → ${sw2.to}）${staleNote(sw2.stale)}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName, stale: !!sw2.stale }, site: siteName });
             retries = 0;
             triedFallback = false;
             method = String(siteConfig.method || 'GET').toUpperCase();
@@ -512,7 +511,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
           // 非首页：换一次仍失败即跳过该页（不限于第1页，避免数据丢失）
           if (sw2.ok && !triedSwitch) {
             triedSwitch = true;
-            log(`第 ${pageNo} 页网络失败已换 IP，立即重试该页${sw2.stale ? '（未验证，取自上一轮快照）' : ''}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName, stale: !!sw2.stale }, site: siteName });
+            log(`第 ${pageNo} 页网络失败已换 IP，立即重试该页${staleNote(sw2.stale)}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName, stale: !!sw2.stale }, site: siteName });
             retries = 0;
             triedFallback = false;
             method = String(siteConfig.method || 'GET').toUpperCase();
@@ -532,7 +531,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     let sw3 = makeSwitchResult();
     try { sw3 = await switchProxy(pageNo === 1 ? 'first_page_exhausted' : 'exhausted'); } catch (_) {}
     if (sw3.ok) {
-      log(`第 ${pageNo} 页重试额度耗尽后已换 IP，立即重试该页${sw3.stale ? '（未验证，取自上一轮快照）' : ''}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName, stale: !!sw3.stale }, site: siteName });
+      log(`第 ${pageNo} 页重试额度耗尽后已换 IP，立即重试该页${staleNote(sw3.stale)}`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw3.from, to: sw3.to, site: siteName, stale: !!sw3.stale }, site: siteName });
       // 必须把本轮 rotation 一并传入：省略第 5 参会退化为 getRotation 回退，
       // 该回退在未注册时新建实例，使递归重试与本轮换点状态脱钩（换点记账丢失）。
       return crawlPage(pageNo, siteConfig, existingIds, maxRetries, rotation || switchProxy);
@@ -868,7 +867,7 @@ async function crawl(a, b, c, d) {
       // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
       const sw = trip.switched;
-      log(`连续 ${trip.netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}${sw.stale ? '（未验证，取自上一轮快照）' : ''}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak: trip.netFailStreak, switched: !!sw.ok, stale: !!sw.stale }, site });
+      log(`连续 ${trip.netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}${staleNote(sw.stale)}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak: trip.netFailStreak, switched: !!sw.ok, stale: !!sw.stale }, site });
     } else if (trip.reason === 'net_fail') {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
       log(`连续 ${trip.netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak: trip.netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });

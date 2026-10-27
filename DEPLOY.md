@@ -162,6 +162,7 @@ crawler 使用：
 CEB_PROXY_URL=http://easy_proxies:24000
 EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
 EASY_PROXIES_REFRESH_COOLDOWN=600
+EASY_PROXIES_REFRESH_TIMEOUT=60
 ```
 
 不要把订阅地址、密码、节点文件提交到仓库。`.env`、`config.yaml`、`nodes.txt` 和运行时节点文件已加入忽略规则。
@@ -315,6 +316,7 @@ HTTP_ENABLED=true
 CEB_PROXY_URL=http://easy_proxies:24000
 EASY_PROXIES_CONTROLLER=http://easy_proxies:9091
 EASY_PROXIES_REFRESH_COOLDOWN=600
+EASY_PROXIES_REFRESH_TIMEOUT=60
 ```
 
 `ceb` 已内置单页串行和 2.5–5.5 秒请求延迟，不建议删除限速。需要分开调度时使用：
@@ -448,7 +450,7 @@ docker compose logs --tail=200 easy_proxies
 
 若 crawler 日志出现 `auth-failed：unauthorized`，说明管理面设置了密码但 `EASY_PROXIES_PASSWORD` 未填写或不匹配。两者需一致（见 3.2 节）。
 
-**注意日志顺序会误导**：crawler 会先用上一轮的节点快照完成若干次「已切换节点」记录，随后才报 `proxy_pool_empty` / `management unavailable`。因此**看到「已切换节点」不代表代理真的可用**——判断标准是管理 API 是否可达（`/api/nodes` 是否返回节点），而非切换日志是否出现。
+**注意日志顺序会误导**：crawler 会先用本轮早先的节点快照完成若干次「已切换节点（未验证，沿用本轮早先节点快照，未再查询管理面）」记录，随后才报 `proxy_pool_empty` / `management unavailable`。因此**看到「已切换节点」不代表代理真的可用**——判断标准是管理 API 是否可达（`/api/nodes` 是否返回节点），而非切换日志是否出现。快照只在本轮内有效：页面成功即清空，不会跨轮残留。
 
 ### CEB 持续 405
 

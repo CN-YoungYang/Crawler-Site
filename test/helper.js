@@ -81,6 +81,22 @@ function setEnv(name, value) {
   };
 }
 
+// 读取本站在隔离 cwd 里刚写下的 JSONL，返回事件数组（断言观测面的唯一入口）。
+// 不自行推算文件名（避免照着实现重算期望值），只取 logs/<site>/ 下唯一的日志文件。
+function readEvents(site) {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(process.cwd(), 'logs', String(site).toLowerCase());
+  const files = fs.readdirSync(dir).filter(name => name.endsWith('.jsonl'));
+  if (files.length !== 1) {
+    throw new Error(`logs/${site}/ 应有且仅有 1 个 JSONL 日志文件，实际 ${files.length}`);
+  }
+  return fs.readFileSync(path.join(dir, files[0]), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
 // 退避抖动归零：backoffDelay() 取全量随机抖动，测试不归零就白等数秒，
 // 且同一用例的耗时不可预测。归零后「重试次数」才是可断言的确定值。
 async function withNoJitter(fn) {
@@ -89,4 +105,4 @@ async function withNoJitter(fn) {
   try { return await fn(); } finally { Math.random = previous; }
 }
 
-module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter };
+module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter, readEvents };

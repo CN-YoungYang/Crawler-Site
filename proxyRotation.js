@@ -27,6 +27,15 @@ function makeSwitchResult(overrides) {
   return { ok: false, from: '', to: '', exhausted: false, stale: false, ...overrides };
 }
 
+// 「本次换点未经验证」的日志后缀：唯一来源，六处调用点都用它。
+// 措辞两条硬约束（曾各错一次，见 2026-10-27 生产日志）：
+// 1) 写「本轮早先」，不写「上一轮」——快照属于本轮 rotation 实例，成功页 reset() 即清空，不跨轮；
+// 2) 写「未再查询管理面」，不写「管理面未触达」——管理面通常可用，只是本次没查，
+//    后者会把排查引向「管理面掉线」。
+function staleNote(stale) {
+  return stale ? '（未验证，沿用本轮早先节点快照，未再查询管理面）' : '';
+}
+
 function desensitizeProxyUrl(url) {
   if (!url) return '';
   try {
@@ -155,7 +164,8 @@ function createRotation(site, siteConfig, deps = {}) {
     // 换点后废弃本站旧隧道长连接：keepAlive 的代理 socket 仍指向旧出口，
     // 不复位会继续用旧 IP 请求
     destroySiteAgents(key);
-    // stale=true 表示本次换点用的是上一轮快照、未触达管理面：
+    // stale=true 表示本次换点用的是本轮早先的节点快照、未触达管理面：
+    // 快照随实例生灭（成功页 reset() 即清空），不可能跨轮残留。
     // 端口号变了，但出口可用性未经确认，调用方不应据此认为「换点成功即恢复」。
     return makeSwitchResult({ ok: true, from: out.from || '', to: out.to || '', stale: out.source === 'snapshot' });
   }
@@ -175,5 +185,6 @@ module.exports = {
   desensitizeProxyUrl,
   getProxyAgentEntry,
   destroySiteAgents,
-  makeSwitchResult
+  makeSwitchResult,
+  staleNote
 };

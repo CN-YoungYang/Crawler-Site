@@ -13,19 +13,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { mockAxios, freshCrawler, withTempCwd, setEnv } = require('./helper');
-
-// 读取本站在隔离 cwd 里刚写下的 JSONL，返回断言所需的事件数组。
-// 不自行推算文件名（避免照着实现重算期望值），只取 logs/<site>/ 下唯一的日志文件。
-function readEvents(site) {
-  const dir = path.join(process.cwd(), 'logs', site);
-  const files = fs.readdirSync(dir).filter(name => name.endsWith('.jsonl'));
-  assert.strictEqual(files.length, 1, `logs/${site}/ 应有且仅有 1 个 JSONL 日志文件，实际 ${files.length}`);
-  return fs.readFileSync(path.join(dir, files[0]), 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map(line => JSON.parse(line));
-}
+const { mockAxios, freshCrawler, withTempCwd, setEnv, readEvents } = require('./helper');
 
 function refreshEvent(events) {
   const found = events.filter(e => e.event === 'proxy_provider_refresh');

@@ -73,7 +73,8 @@ node index.js
 | `CEB_PROXY_URL` / `PROXY_CEB` | Compose 中为 `http://easy_proxies:24000` | CEB 的代理入口；未设置时本地运行直连，换点时 crawler 会按健康节点改用其他业务端口 |
 | `EASY_PROXIES_CONTROLLER` | Compose 中为 `http://easy_proxies:9091` | easy_proxies 管理地址，用于 `/api/nodes`、可选 `/api/auth` 与 `/api/subscription/refresh` |
 | `EASY_PROXIES_PASSWORD` | 空 | 仅当 easy_proxies 管理面设置密码时填写；不要提交到仓库 |
-| `EASY_PROXIES_REFRESH_COOLDOWN` | 600 秒 | 订阅刷新成功后的限频窗口；失败不会写入冷却时间 |
+| `EASY_PROXIES_REFRESH_COOLDOWN` | 600 秒 | 订阅刷新成功后的限频窗口。刷新失败不写冷却；**超时例外**——POST 已送达、服务端多半仍在执行，超时同样写冷却，避免每轮重复阻塞 |
+| `EASY_PROXIES_REFRESH_TIMEOUT` | 60 秒 | `POST /api/subscription/refresh` 的独立超时。该接口会同步等待订阅拉取 + 健康检查，不能沿用 `/api/nodes` 的 2 秒 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 空 | 通用代理与直连白名单；站点专用 `CEB_PROXY_URL` / `PROXY_CEB` 优先级更高 |
 
 ```bash
@@ -229,7 +230,7 @@ crawler/
 │   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 18 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 19 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
