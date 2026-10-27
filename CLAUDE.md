@@ -34,7 +34,7 @@ docker compose down
 
 ## 架构与数据流
 
-数据流为：`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js` → `server.js`。
+数据流为：`index.js` → `crawler.js` + `breaker.js` + `log.js` + `sites/` → `report.js` → `server.js`。
 
 1. **`index.js`**：解析并校验环境变量，验证 `getSiteConfig()` 和 `nextCronDelay()`，启动静态服务，预生成 `file/index.html`，刷新 easy_proxies 订阅，并为每个站点启动 `scheduleLoopForSite`。站点调度通过 `Promise.all` 并发；每轮执行 `crawl()` → `generateReport(site)` → `generateNav()`。收到 `SIGINT`/`SIGTERM` 时停止新批次并关闭 HTTP 服务。
 2. **`crawler.js`**：按站点批次并发抓取。默认 `BATCH_SIZE=10`，`ceb` 使用 `batchSize:1` 和 `requestDelay` 串行限速。导出 `crawl()`、`crawlPage()`、`backoffDelay()`、`readRecentIds()`、`fileDir()`、`stateFile()`、`isStopping()` 和 `refreshProxyProviders()`。
@@ -61,7 +61,7 @@ docker compose down
 
 ## 测试与修改要求
 
-测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 16 个测试套件。
+测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 18 个测试套件。
 
 不要手工编辑 `file/`、`logs/` 或其他运行时生成文件。修改站点时同步检查 `sites/index.js`、`crawler.js`、`README.md` 和相关测试；修改领域术语或架构决策时阅读 `CONTEXT.md` 和相关 `docs/adr/`。
 

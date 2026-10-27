@@ -229,10 +229,12 @@ crawler/
 │   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 16 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 18 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
+│   ├── breaker.test.js      # 熔断判定模块（405/盾页/网络连败/边界语义）
+│   ├── boundaryPrecedence.test.js # 边界优先于熔断：同批 403 + 405 仍记 endReached 且不留断点
 │   ├── checkpoint.test.js   # 熔断断点不越过失败页（405 / 网络连败）
 │   ├── crawlEndLevel.test.js # crawl_end 汇总分级（整轮无有效成功页 → warn）
 │   ├── subscriptionRefresh.test.js # 订阅刷新透出节点数/订阅错误（空池降级 warn）

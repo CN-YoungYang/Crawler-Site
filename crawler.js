@@ -8,6 +8,7 @@ const { getSiteConfig, normalizeSite } = require('./sites');
 const easyProxies = require('./sites/_easy_proxies');
 const { shanghaiDateStr, hasValidXlsxHeader } = require('./utils');
 const proxyRotation = require('./proxyRotation');
+const { createBreaker, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD } = require('./breaker');
 
 // 默认站点策略（原 sites/_base.js，已内联避免单实现抽象层）
 function defaultExtractId(link) {
@@ -58,10 +59,6 @@ const REQUEST_TIMEOUT = 30000;
 // 重试退避：指数 base*2^attempt，封顶 cap，全量抖动 random(0, delay)
 const BACKOFF_BASE_MS = 2000;
 const BACKOFF_CAP_MS = 60000;
-// 网络级失败（无 HTTP status，如 ECONNRESET/TLS 握手断开）换 IP 阈值：距上次成功页连续 N 页失败即切节点（仅代理站点生效）
-const NET_FAIL_SWITCH_THRESHOLD = 2;
-// 网络级失败熔断：换 IP 后仍连败至 N 页，判定代理出口不可用，提前结束（避免 100 页 × 全量重试空转数小时，2026-08-24 曾空转约 5 小时）
-const NET_FAIL_BREAK_THRESHOLD = 6;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -717,23 +714,19 @@ async function crawl(a, b, c, d) {
   let stoppedBySignal = false;
   let totalNew = 0;
   let totalFailed = 0;
-  // 本轮真正解析到内容的页数（「成功但无新数据」也算）。不含 403 边界页：
-  // 边界页只证明站点应答了「到底了」，不证明出口链路可用——2026-10-26T21:10
-  // yfbzb 那一轮 99 页失败、唯一「成功」就是第 100 页的 403，把边界计入会把事故记成 info。
-  let pagesSucceeded = 0;
+  // 熔断判定收在 breaker 内：405 连击、盾页不可解、网络连败三条规则及其换点观察窗
+  // 都只在 breaker.js 里，这里只负责喂页面结果、批末问一次 trip()（边界批次跳过）。
+  // 内容成功页数也由它持有（边界页与零行页不算，见 breaker.record 注释）。
+  const breaker = createBreaker({
+    switchProxy: reason => rotation.switch(reason)
+  });
   let fileWriteFailed = 0;
   let fileWriteSucceeded = 0;
   const failedIds = new Set();
   let endReached = false;
-  let consecutive405 = 0;
-  // WAF 挑战连续求解失败页数：盾页不可解时换 IP 也无济于事，连续 2 页即熔断，避免空转烧 IP。
-  let consecutiveShield = 0;
-  // 双 405 触发的成功换点次数（单轮运行内）：换点成功即重置 consecutive405 给新出口观察页
-  let proxy405Switches = 0;
-  // 网络级连败（ECONNRESET/超时等无 status 失败）：代理站点达阈值换 IP，再连败至翻倍熔断；成功/边界页清零。
-  // netFailSwitched：本轮连败是否已尝试过换 IP（保证熔断前至少真换一次，批次站单批即可越过换 IP 阈值）
-  let netFailStreak = 0;
-  let netFailSwitched = false;
+  // 最先返回边界的页号：边界之后的页本来就不存在，针对它们的重试点没有意义
+  // （见收尾处的断点判定）。null 表示本轮没碰过边界。
+  let boundaryPage = null;
   // 第一页探针轮尽：所有代理节点均失败，判定出口不可用，取消本次抓取
   let gateAborted = false;
   let retryFromPage = null;
@@ -771,8 +764,12 @@ async function crawl(a, b, c, d) {
     let batchEndReached = false;
 
     for (let i = 0; i < results.length; i++) {
-      const { pageData, failed, endReached: ended, status, emptyPage } = results[i];
+      const { pageData, failed, endReached: ended, status } = results[i];
       const pageNo = batchStartPage + i;
+
+      // 先把页面结果交给 breaker 记账，它内部维护 405 连击/盾页/网络连败与内容成功页数。
+      // 直接传整页结果：record 的契约就是「读哪些字段」，多带的字段它不看。
+      const proxy405Switches = breaker.record(results[i]);
 
       if (failed) {
         failedCount++;
@@ -786,39 +783,24 @@ async function crawl(a, b, c, d) {
           noteRetryPage(batchStartPage);
           continue;
         }
-        // 405 连击：换点成功即清零（给新出口一个完整请求的观察窗，避免未验证先熔断），否则累计
-        if (status === 405) {
-          if (results[i].proxySwitched) {
-            consecutive405 = 0;
-            proxy405Switches++;
-            log(`第 ${pageNo} 页双 405 但已换 IP，重置连续拦截计数，新出口观察中（本轮已换 ${proxy405Switches} 次）`, { level: 'warn', event: 'proxy_switched_reset_405', context: { page: pageNo, site, switches: proxy405Switches }, site });
-          } else {
-            consecutive405++;
-          }
+        // 换点成功即时回报（计数早已在 breaker 里重置；record() 把累计次数带回来）
+        if (status === 405 && results[i].proxySwitched) {
+          log(`第 ${pageNo} 页双 405 但已换 IP，重置连续拦截计数，新出口观察中（本轮已换 ${proxy405Switches} 次）`, { level: 'warn', event: 'proxy_switched_reset_405', context: { page: pageNo, site, switches: proxy405Switches }, site });
         }
         log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status, proxySwitched: !!results[i].proxySwitched, proxyExhausted: !!results[i].proxyExhausted, shield: !!results[i].shieldType }, site });
-        // 网络级失败（无 status：ECONNRESET/超时/TLS 断开）计数，代理站点达阈值换 IP、再连败熔断；
-        // 有 status 的失败（403/405 等已到服务器）说明链路连通，不计入
-        if (status === undefined || status === null) netFailStreak++;
-        if (results[i].shieldType) consecutiveShield++;
         continue;
       }
 
-      // 非失败页（成功或边界）重置 405 熔断计数与网络连败计数，
-      // 并清空本轮换点记忆与节点快照（下一批可从头再试各节点、按最新订阅重发现）
-      consecutive405 = 0;
-      consecutiveShield = 0;
-      netFailStreak = 0;
-      netFailSwitched = false;
+      // 站点真实应答：出口活着，清空本轮换点记忆与节点快照
+      // （下一批可从头再试各节点、按最新订阅重发现）。
+      // 熔断计数由 breaker.record 内部清零。
       rotation.reset();
 
       if (ended) {
         batchEndReached = true;
+        if (boundaryPage === null || pageNo < boundaryPage) boundaryPage = pageNo;
         continue;
       }
-      // 边界页在上面已 continue；空页（200 但零行）也不计入——
-      // 它可能是未识别的风控页，把它当「出口可用」正是要消灭的静默失败。
-      if (!emptyPage) pagesSucceeded++;
 
       let pageNew = 0;
       if (pageData.length) {
@@ -861,30 +843,37 @@ async function crawl(a, b, c, d) {
       }
     }
 
-    // WAF 挑战熔断：盾页连续 2 页不可解，换 IP 也只会拿到同样的盾，避免烧掉整池出口
-    if (consecutiveShield >= 2) {
-      log(`连续 ${consecutiveShield} 页 WAF 挑战求解失败，判定盾页不可解，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
-      shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
-    } else if (consecutive405 >= 2) {
-      log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
-      shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
-    } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
-      // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
-      // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
-      let sw = makeSwitchResult();
-      try { sw = await rotation.switch('net_fail_streak'); } catch (_) {}
-      netFailSwitched = true;
-      log(`连续 ${netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}${sw.stale ? '（未验证，取自上一轮快照）' : ''}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak, switched: !!sw.ok, stale: !!sw.stale }, site });
-    } else if (netFailStreak >= NET_FAIL_BREAK_THRESHOLD && netFailSwitched) {
-      // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
-      log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
-      shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
-    } else if (batchEndReached) {
+    // 只在「本批没到底」时才问熔断器：trip() 可能真的去换 IP（网络连败阈值），
+    // 而触达边界的批次已经在收尾，换点既用不上也没人再验证新出口——
+    // 白白烧掉一次换点预算，日志里还只字不提。边界优先，连问都不问。
+    // trip() 把计数一并带回，调用方不必再问一次 snapshot()。
+    const trip = batchEndReached ? {} : await breaker.trip();
+    // 边界优先于熔断：边界页语义是「这是今天最后一条数据」，它之后的页本来就不存在；
+    // 那些页的 405 是在请求不存在的数据，不能反过来盖掉「已经到底」这个事实。
+    // 顺序颠倒过（熔断在前）时，batchSize 10 的整批并发会让第 1 页的 403 被其余页的
+    // 405 吞掉：既不记 endReached，还会 noteRetryPage 保留断点让下一轮重爬同一批。
+    if (batchEndReached) {
       endReached = true;
       shouldStopCrawling = true;
+    } else if (trip.reason === 'shield') {
+      // 盾页连续不可解：换 IP 也只会拿到同样的盾，避免烧掉整池出口
+      log(`连续 ${trip.consecutiveShield} 页 WAF 挑战求解失败，判定盾页不可解，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield: trip.consecutiveShield, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      shouldStopCrawling = true;
+      noteRetryPage(batchStartPage);
+    } else if (trip.reason === '405') {
+      log(`连续 ${trip.consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${trip.proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405: trip.consecutive405, proxySwitches405: trip.proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      shouldStopCrawling = true;
+      noteRetryPage(batchStartPage);
+    } else if (trip.switched) {
+      // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
+      // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
+      const sw = trip.switched;
+      log(`连续 ${trip.netFailStreak} 页网络级失败（ECONNRESET/超时）${sw.ok ? `，已切换代理节点 → ${sw.to}${sw.stale ? '（未验证，取自上一轮快照）' : ''}` : '，未配置可切换代理或节点池已轮尽'}，继续爬取 [${site}]`, { level: 'warn', event: 'proxy_switch_net_fail', context: { site, netFailStreak: trip.netFailStreak, switched: !!sw.ok, stale: !!sw.stale }, site });
+    } else if (trip.reason === 'net_fail') {
+      // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
+      log(`连续 ${trip.netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak: trip.netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      shouldStopCrawling = true;
+      noteRetryPage(batchStartPage);
     } else if (!hasNewDataInBatch && failedCount === 0) {
       log(`当前批次（第 ${currentPage - pagesToCrawl} 到第 ${currentPage - 1} 页）无新数据，停止爬取`, { event: 'early_stop', context: { failedCount, threshold: failureThreshold, site }, site });
       shouldStopCrawling = true;
@@ -932,7 +921,17 @@ async function crawl(a, b, c, d) {
 
   if (stopping) stoppedBySignal = true;
   const checkpointPage = fileWriteFailed > 0 ? runStartPage : (retryFromPage ?? currentPage);
-  if (stoppedBySignal || retryFromPage !== null || fileWriteFailed > 0) {
+  // 触达边界是「今天的数据已经到头」：边界**及其之后**的页本来就不存在，
+  // 针对它们的重试点无法靠重爬补回，保留断点只会让下一轮从同一个地方再撞一次边界。
+  // 但边界之前各批的失败是另一回事——那些页真实存在且没抓到，必须照常续跑。
+  // （早先写成「只要 endReached 就整轮不留断点」，会让续跑撞到边界时把起始页
+  //  连同途中的失败一起丢掉，等于凭空跳过了一整段。）
+  const retryPointsAtRealPages =
+    retryFromPage !== null && (boundaryPage === null || retryFromPage < boundaryPage);
+  // 写盘失败是例外——数据真的没落盘，与边界无关，仍要保留断点重试。
+  const endReachedCleanly =
+    endReached && fileWriteFailed === 0 && !stoppedBySignal && !retryPointsAtRealPages;
+  if (!endReachedCleanly && (stoppedBySignal || retryFromPage !== null || fileWriteFailed > 0)) {
     saveCheckpoint(site, checkpointPage, existingIds);
     const checkpointLevel = fileWriteFailed > 0 ? 'error' : 'warn';
     const checkpointEvent = fileWriteFailed > 0
@@ -950,6 +949,7 @@ async function crawl(a, b, c, d) {
 
   const durationMs = Date.now() - startedAt;
   const totalPersisted = totalNew - failedIds.size;
+  const pagesSucceeded = breaker.snapshot().contentPages;
   // 整轮没有一页成功返回：出口被封/代理全挂/站点级拦截。这类轮次与「今天没新数据」
   // 在汇总行里必须能区分开——2026-10-27 yfbzb 99/100 页失败、ceb 连续 15 轮 0 条，
   // 当时全部是 info，事后翻日志才发现（详见 test/crawlEndLevel.test.js）。

@@ -1,8 +1,8 @@
 // 回归：双 405 熔断器（consecutive405）。
 //
-// 守卫的真实事故（ADR 0001 / crawler.js:62 注释）：ceb 在固定出口 IP 下
+// 守卫的真实事故（ADR 0001「修订 2026-08-21」）：ceb 在固定出口 IP 下
 // GET 405 → 降级 POST 仍 405，曾空转 100 页、约 5 小时。
-// crawler.js:766-774 累计连续 405，crawler.js:838-841 达 2 页即熔断提前结束。
+// 连续 405 的累计与「达 2 页即熔断」现已收在 breaker.js（crawl() 批末问一次 trip()）。
 //
 // 该逻辑此前零覆盖：所有 405 fixture 都停在 crawlPage() 层，
 // 唯一走到 crawl() 批次循环的失败用例用的是无 status 的 ECONNRESET（计 netFailStreak）。
