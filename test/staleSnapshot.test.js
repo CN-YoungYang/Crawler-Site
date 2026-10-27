@@ -9,23 +9,13 @@
 //
 // 接缝：sites/_easy_proxies.js#switchNode 的返回值（提供方与编排层之间的契约）。
 const assert = require('assert');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, setEnv } = require('./helper');
 
 const NODES = [
   { tag: 'N1', name: '节点一', port: 24000, available: true, initial_check_done: true },
   { tag: 'N2', name: '节点二', port: 24001, available: true, initial_check_done: true },
   { tag: 'N3', name: '节点三', port: 24002, available: true, initial_check_done: true }
 ];
-
-function setEnv(name, value) {
-  const previous = process.env[name];
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-  return () => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  };
-}
 
 async function run() {
   // 管理 API 始终不可达，逼出「退用快照」这条路径。

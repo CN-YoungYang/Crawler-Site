@@ -70,4 +70,23 @@ function withTempCwd(fn) {
   });
 }
 
-module.exports = { mockAxios, freshCrawler, withTempCwd };
+// 临时改一个环境变量，返回还原函数。代理/订阅相关用例都要改 env，四份拷贝没有意义。
+function setEnv(name, value) {
+  const previous = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  return () => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  };
+}
+
+// 退避抖动归零：backoffDelay() 取全量随机抖动，测试不归零就白等数秒，
+// 且同一用例的耗时不可预测。归零后「重试次数」才是可断言的确定值。
+async function withNoJitter(fn) {
+  const previous = Math.random;
+  Math.random = () => 0;
+  try { return await fn(); } finally { Math.random = previous; }
+}
+
+module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter };

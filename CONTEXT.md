@@ -34,7 +34,7 @@
 ## easy_proxies 配置契约
 
 - Compose 启动 `easy_proxies` 旁车服务，挂载 `./easy_proxies:/etc/easy_proxies`；首次使用复制 `config.yaml.example` 为 `config.yaml`，在 `subscriptions` 中填写真实订阅地址，或使用 `nodes_file`。
-- `management.listen` 默认 `0.0.0.0:9091`，crawler 通过 `GET /api/nodes` 发现健康节点；配置管理密码时先调用 `POST /api/auth`，订阅刷新使用 `POST /api/subscription/refresh`。
+- `management.listen` 默认 `0.0.0.0:9091`，crawler 通过 `GET /api/nodes` 发现健康节点；配置管理密码时先调用 `POST /api/auth`，订阅刷新使用 `POST /api/subscription/refresh`。刷新后 crawler 再读 `GET /api/subscription/status` 取 `node_count`/`refresh_count`/`last_error`——该接口返回 200 不代表节点已更新，订阅拉取失败时 easy_proxies 会回退旧缓存并照样返回 200。因此 `node_count === 0` **或** `last_error` 非空都记 `warn`（后者即「正用着缓存节点」）；`refresh_count` 每次完成的刷新尝试都自增（含失败），仅作诊断线索，不参与分级——easy_proxies 侧刷新是排队异步执行的，POST 后立刻读可能尚未自增。
 - `multi_port.base_port` 默认 `24000`，Compose 暴露内部业务端口范围 `24000-24200`；crawler 通过修改代理 URI 端口切换节点，不把 `9091` 当作代理端口。
 - 管理面不可达、认证失败或节点池为空时 代理提供方安全降级，不阻塞主爬取；真实订阅、密码、节点文件和运行时状态均不得提交。
 

@@ -1,16 +1,6 @@
 // 边界：easy_proxies 管理 API 契约、健康节点端口轮换与 CEB 双 405 重试。
 const assert = require('assert');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
-
-function setEnv(name, value) {
-  const previous = process.env[name];
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-  return () => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  };
-}
+const { mockAxios, freshCrawler, withTempCwd, setEnv } = require('./helper');
 
 function activeNodes() {
   return [

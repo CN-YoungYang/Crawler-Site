@@ -153,6 +153,8 @@ server {
   [2026-08-14T06:35:01.113Z] [PID: 10572] [yfbzb] 第 10 页无新增数据（站点边界），已爬至当日末尾
   ```
 
+  `crawl_end` 汇总行按「这次到底成没成」分级：一整轮没有任何页解析到内容（`level=warn`，附「本轮无任何页成功返回（疑似出口不可用）」）；有失败页时补上成功页数（`失败 3 页（成功 1 页）`），避免 99 失败 + 1 页旧数据被读成正常跑完。403 边界页和 200 零行页都不计入成功页数。
+
 - **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 轻量存活探针、`GET /<site>/<date>.xlsx` → 下载。
 - **断点续跑**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
 
@@ -165,7 +167,7 @@ server {
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。订阅刷新后额外读 `GET /api/subscription/status`，把实际 `node_count`/`refresh_count`/`last_error` 记入日志；节点数为 0 **或** `last_error` 非空（订阅拉取失败但仍回退旧缓存，`node_count` 不为 0）时降级为 `warn`，状态接口不可达不影响刷新判定。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
@@ -173,7 +175,7 @@ server {
      - 第 1 页探针因节点池轮尽返回 `gateAbort`，本轮以 `first_page_gate_abort` 结束
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
-   - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。
+   - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。断点只前移不越过失败页——熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败与第一页探针轮尽都保留全部批次中最早的失败页，避免失败页被跳过后再也不重爬。
    - **优雅退出**：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 发送 `SIGTERM` 同理。
 
 ### 关于 403（重要）
@@ -227,10 +229,13 @@ crawler/
 │   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 13 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 16 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
+│   ├── checkpoint.test.js   # 熔断断点不越过失败页（405 / 网络连败）
+│   ├── crawlEndLevel.test.js # crawl_end 汇总分级（整轮无有效成功页 → warn）
+│   ├── subscriptionRefresh.test.js # 订阅刷新透出节点数/订阅错误（空池降级 warn）
 │   ├── staleSnapshot.test.js # 陈旧快照换点须标注 source=snapshot
 │   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）

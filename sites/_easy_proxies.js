@@ -266,6 +266,46 @@ function refreshCooldownMs() {
   return (Number.isFinite(value) && value >= 0 ? value : 600) * 1000;
 }
 
+// 订阅错误文本脱敏：上游错误信息是自由文本，实测会内嵌订阅 URL（含密钥）
+// 和节点 IP（`dial tcp 1.2.3.4:443: i/o timeout`）。AGENTS.md/CLAUDE.md 禁止
+// 把订阅地址和节点 IP 写进日志。保留错误类型与状态码，抹掉身份信息。
+function desensitizeErrorText(text) {
+  const raw = String(text == null ? '' : text);
+  if (!raw) return '';
+  return raw
+    // 订阅地址整体不可见（主机、路径、查询都可能带订阅身份），只保留协议以示来源类型
+    .replace(/https?:\/\/[^\s"'<>）)]+/gi, (u) => {
+      try {
+        return `${new URL(u).protocol}//***`;
+      } catch (_) {
+        return '***';
+      }
+    })
+    // 节点 IP（含 IPv6、可选端口）：拨号错误里到处是它
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?/g, '***')
+    .replace(/\[[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\](?::\d+)?/gi, '***');
+}
+
+// 读取订阅状态（节点数 / 订阅侧错误）。这是「刷新是否真的换了节点」的唯一线索：
+// easy_proxies 在订阅拉取失败、回退旧缓存时同样返回 200，只看刷新接口的 200 会永久静默。
+// 状态接口不可达（旧版本、管理面半死）时返回 null，绝不影响刷新本身的成败判定。
+async function readSubscriptionStatus(base) {
+  try {
+    const response = await request(base, 'GET', '/api/subscription/status');
+    const data = (response && response.data) || {};
+    return {
+      nodeCount: Number.isInteger(data.node_count) ? data.node_count : undefined,
+      lastError: typeof data.last_error === 'string' ? desensitizeErrorText(data.last_error) : '',
+      // 每次完成的刷新尝试都计数（含失败）。只作诊断线索、不参与分级：
+      // 刷新在 easy_proxies 侧排队异步执行，我们 POST 后立刻读状态，
+      // 此刻它可能还没被循环认领，refresh_count 尚未自增——拿它判成败会误报。
+      refreshCount: Number.isInteger(data.refresh_count) ? data.refresh_count : undefined
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 async function refreshProviders({ site = '', reason = '', siteConfig, proxyUrl } = {}) {
   const now = Date.now();
   if (now - refreshAt < refreshCooldownMs()) return false;
@@ -277,9 +317,24 @@ async function refreshProviders({ site = '', reason = '', siteConfig, proxyUrl }
       try {
         await request(base, 'POST', '/api/subscription/refresh');
         refreshAt = Date.now();
-        log(`已触发 easy_proxies 订阅刷新 [${site}] ${reason}`, {
+        // 刷新返回 200 只说明接口被受理，不代表拿到新节点：读状态把「实际节点数」带进日志。
+        const status = await readSubscriptionStatus(base);
+        const nodeCount = status ? status.nodeCount : undefined;
+        const subError = status ? status.lastError : '';
+        const refreshCount = status ? status.refreshCount : undefined;
+        const empty = nodeCount === 0;
+        // last_error 非空时同样要 warn：订阅拉取失败但回退旧缓存时 node_count 仍 > 0，
+        // 只看节点数会把「正在用过期节点」记成 info。缓存节点能撑多久全凭运气，
+        // 整池过期后就是 ceb 连续 15 轮 0 条那种静默失败。
+        const degraded = empty || !!subError;
+        const detail = status
+          ? `，节点 ${nodeCount === undefined ? '未知' : nodeCount} 个${subError ? `，订阅错误：${subError}` : ''}`
+          : '（状态接口不可达，无法确认节点数）';
+        log(`easy_proxies 订阅刷新 [${site}] ${reason}${detail}`, {
+          // 空池或订阅报错必须 warn：否则会表现为「每轮刷新成功、每轮 0 条」的静默失败
+          level: degraded ? 'warn' : 'info',
           event: 'proxy_provider_refresh',
-          context: { site, reason, endpoint: `${base}/api/subscription/refresh` },
+          context: { site, reason, endpoint: `${base}/api/subscription/refresh`, nodeCount, refreshCount, lastError: subError },
           site
         });
         return true;

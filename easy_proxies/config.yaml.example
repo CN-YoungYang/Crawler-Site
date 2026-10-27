@@ -19,13 +19,20 @@ multi_port:
 pool:
   mode: sequential
   failure_threshold: 3
+  # 多端口模式下每个端口是只有 1 个 member 的独立 pool，拉黑只影响该端口。
+  # 1h 比默认 24h 短得多：探测目标与真实站点路径不同，误判后能较快自愈。
   blacklist_duration: 1h
+  # 超时/重置/503 只进短冷却，不计入 failure_threshold 的拉黑计数。
+  transient_cooldown: 60s
+  rate_limit_cooldown: 60s
   retry_enabled: true
   retry_attempts: 3
 
 management:
   enabled: true
   listen: 0.0.0.0:9091
+  # 探测走 HTTP GET /generate_204 并要求 2xx/3xx。改这个地址前先用 crawler 容器实测可达，
+  # 否则整池节点会因探测失败被判为 0 available（2026-10-27 排查过一次）。
   probe_target: http://cp.cloudflare.com/generate_204
   password: ""
 
@@ -38,14 +45,20 @@ dns:
   strategy: prefer_ipv4
 
 subscription_refresh:
+  # 必须保持 true：订阅是动态节点池，关闭后只在容器启动时同步拉取一次，
+  # 节点过期不会自动更新，整池会一直超时（线上实测 0 available / 29 failed 即此因）。
+  # 注意：手动 POST /api/subscription/refresh 不受此开关限制，但定时刷新受。
   enabled: true
+  # 每次刷新会重建多端口隧道并中断在途连接；30m 兼顾节点新鲜度与 ceb 串行抓取的稳定性。
   interval: 30m
   timeout: 30s
   fetch_concurrency: 16
   health_check_timeout: 60s
+  # 启动/重载时等待至少 N 个节点探测通过再继续（不是切换门槛）。
   min_available_nodes: 1
 
 subscriptions:
+  # 订阅地址含密钥，只写进被 gitignore 的 config.yaml，不要提交仓库。
   # - "https://your-host.example/clash_fast.yaml"
 
 # 也可以改为手工节点文件；每行一个代理 URI。

@@ -407,6 +407,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         const filtered = Array.isArray(pageData) ? pageData.filter(item => !existingIds.has(item.id)) : [];
         log(`爬取完成第 ${pageNo} 页，共找到 ${filtered.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: filtered.length, site: siteName }, site: siteName });
         const realTotalPages = await extractRealTotalPages(siteConfig, $loaded, response.data);
+        // 这里刻意不设 emptyPage：自定义 parse 返回的是「去重后的新行」，零行既可能是
+        // 空页也可能是正常的一天没新数据。ceb 的风控页由 challenge 钩子单独识别
+        // （shieldType），不依赖这条信号，不能为了统一形状把正常去重误判成出口故障。
         return { pageData: filtered, failed: false, realTotalPages };
       }
 
@@ -417,7 +420,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
 
       if (rows.length === 0) {
         log(`第 ${pageNo} 页没有找到任何数据`, { event: 'page_empty', context: { page: pageNo, site: siteName }, site: siteName });
-        return { pageData: [], failed: false, realTotalPages };
+        // emptyPage：HTTP 200 但零行。没有 challenge 钩子的站点（如 yfbzb）若被换成
+        // 另一种 200 形态的风控页，这里就是唯一能看见的信号，不能计入「成功页」。
+        return { pageData: [], failed: false, realTotalPages, emptyPage: true };
       }
 
       // 走默认 selectors 解析（crawler.js 内联 defaultParse）；显式传入解析后的 selectors（含 yfbzb 兜底），
@@ -712,6 +717,10 @@ async function crawl(a, b, c, d) {
   let stoppedBySignal = false;
   let totalNew = 0;
   let totalFailed = 0;
+  // 本轮真正解析到内容的页数（「成功但无新数据」也算）。不含 403 边界页：
+  // 边界页只证明站点应答了「到底了」，不证明出口链路可用——2026-10-26T21:10
+  // yfbzb 那一轮 99 页失败、唯一「成功」就是第 100 页的 403，把边界计入会把事故记成 info。
+  let pagesSucceeded = 0;
   let fileWriteFailed = 0;
   let fileWriteSucceeded = 0;
   const failedIds = new Set();
@@ -728,6 +737,14 @@ async function crawl(a, b, c, d) {
   // 第一页探针轮尽：所有代理节点均失败，判定出口不可用，取消本次抓取
   let gateAborted = false;
   let retryFromPage = null;
+  // 断点唯一的不变量：只前移，不越过失败页。
+  // 页面级失败、三个熔断分支（WAF/405/网络连败）、写盘失败、第一页探针轮尽
+  // 都必须经由它记录，否则后发生的事件会把断点推到更晚的页，更早的失败页
+  // 从此不再重爬（2026-10-27 ceb 断点 6→11→16… 每轮 +5，前 5 页永久丢失）。
+  function noteRetryPage(page) {
+    if (!Number.isInteger(page) || page < 1) return;
+    retryFromPage = retryFromPage === null ? page : Math.min(retryFromPage, page);
+  }
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
   // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置
   let realTotalPagesObserved;
@@ -754,19 +771,19 @@ async function crawl(a, b, c, d) {
     let batchEndReached = false;
 
     for (let i = 0; i < results.length; i++) {
-      const { pageData, failed, endReached: ended, status } = results[i];
+      const { pageData, failed, endReached: ended, status, emptyPage } = results[i];
       const pageNo = batchStartPage + i;
 
       if (failed) {
         failedCount++;
         totalFailed++;
-        retryFromPage = retryFromPage === null ? pageNo : Math.min(retryFromPage, pageNo);
+        noteRetryPage(pageNo);
         // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
         if (results[i].gateAbort) {
           gateAborted = true;
           log(`第一页在所有代理节点上均失败，判定出口全部不可用，取消本次抓取 [${site}]`, { level: 'error', event: 'first_page_gate_abort', context: { site, page: pageNo }, site });
           shouldStopCrawling = true;
-          retryFromPage = batchStartPage;
+          noteRetryPage(batchStartPage);
           continue;
         }
         // 405 连击：换点成功即清零（给新出口一个完整请求的观察窗，避免未验证先熔断），否则累计
@@ -799,6 +816,9 @@ async function crawl(a, b, c, d) {
         batchEndReached = true;
         continue;
       }
+      // 边界页在上面已 continue；空页（200 但零行）也不计入——
+      // 它可能是未识别的风控页，把它当「出口可用」正是要消灭的静默失败。
+      if (!emptyPage) pagesSucceeded++;
 
       let pageNew = 0;
       if (pageData.length) {
@@ -845,11 +865,11 @@ async function crawl(a, b, c, d) {
     if (consecutiveShield >= 2) {
       log(`连续 ${consecutiveShield} 页 WAF 挑战求解失败，判定盾页不可解，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      retryFromPage = batchStartPage;
+      noteRetryPage(batchStartPage);
     } else if (consecutive405 >= 2) {
       log(`连续 ${consecutive405} 页 405（GET→POST 双 405，本轮已换 IP ${proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405, proxySwitches405: proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      retryFromPage = batchStartPage;
+      noteRetryPage(batchStartPage);
     } else if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
       // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
@@ -861,7 +881,7 @@ async function crawl(a, b, c, d) {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
       log(`连续 ${netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      retryFromPage = batchStartPage;
+      noteRetryPage(batchStartPage);
     } else if (batchEndReached) {
       endReached = true;
       shouldStopCrawling = true;
@@ -880,7 +900,7 @@ async function crawl(a, b, c, d) {
     for (const id of batchPersist.failedIds) failedIds.add(id);
     for (const id of batchPersist.failedIds) existingIds.delete(id);
     if (batchPersist.fileWriteFailed > 0) {
-      retryFromPage = retryFromPage === null ? batchStartPage : Math.min(retryFromPage, batchStartPage);
+      noteRetryPage(batchStartPage);
       shouldStopCrawling = true;
     }
 
@@ -930,10 +950,18 @@ async function crawl(a, b, c, d) {
 
   const durationMs = Date.now() - startedAt;
   const totalPersisted = totalNew - failedIds.size;
-  const crawlLevel = fileWriteFailed > 0 ? 'warn' : 'info';
+  // 整轮没有一页成功返回：出口被封/代理全挂/站点级拦截。这类轮次与「今天没新数据」
+  // 在汇总行里必须能区分开——2026-10-27 yfbzb 99/100 页失败、ceb 连续 15 轮 0 条，
+  // 当时全部是 info，事后翻日志才发现（详见 test/crawlEndLevel.test.js）。
+  const nothingSucceeded = pagesSucceeded === 0 && totalFailed > 0;
+  const crawlLevel = fileWriteFailed > 0 || nothingSucceeded ? 'warn' : 'info';
+  const allFailedSuffix = nothingSucceeded ? '，本轮无任何页成功返回（疑似出口不可用）' : '';
+  // 有失败时点明成功页数：只写「失败 99 页」会让读者以为其余页都有产出，
+  // 而 99 失败 + 1 页全是旧数据同样是「这一轮几乎什么都没拿到」。
+  const successSuffix = totalFailed > 0 && !nothingSucceeded ? `（成功 ${pagesSucceeded} 页）` : '';
   const narrowedSuffix = realTotalPagesObserved !== undefined && effectiveTotalPages < totalPages ? `，站点总页数 ${realTotalPagesObserved}，按 ${effectiveTotalPages} 页停止` : '';
   const gateSuffix = gateAborted ? '，第一页探针轮尽已取消抓取' : '';
-  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${narrowedSuffix}${gateSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, endReached, durationMs, stoppedBySignal, gateAborted, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
+  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页${successSuffix}，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${allFailedSuffix}${narrowedSuffix}${gateSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, pagesSucceeded, nothingSucceeded, endReached, durationMs, stoppedBySignal, gateAborted, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
 }
 
 function readRecentIds(site) {

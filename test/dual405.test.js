@@ -4,18 +4,8 @@
 // (c) 连续无 status 失败（ECONNRESET/超时）达熔断阈值 → crawl 提前结束，不再爬满 totalPages
 // (d) easy_proxies 独立端口换点：第一页失败时按序切换节点，成功或节点池轮尽即停止
 const assert = require('assert');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, setEnv } = require('./helper');
 const { pageHtml, ROW_NEW } = require('./fixtures');
-
-function setEnv(name, value) {
-  const previous = process.env[name];
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-  return () => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  };
-}
 
 async function mainBase() {
   const previousRandom = Math.random;
@@ -127,6 +117,9 @@ function makeEasyHarness(targetHandler) {
       return { data: { nodes: EASY_NODES.map(node => ({ ...node })) }, status: 200 };
     }
     if (target.endsWith('/api/subscription/refresh')) return { data: {}, status: 204 };
+    // 刷新后会读订阅状态取节点数（sites/_easy_proxies.js#readSubscriptionStatus）；
+    // 这是管理面请求，不能计入 targetCalls，否则会污染业务请求计数。
+    if (target.endsWith('/api/subscription/status')) return { data: { node_count: EASY_NODES.length }, status: 200 };
     state.targetCalls++;
     state.targetUrls.push(target);
     // 记录本次业务请求实际使用的代理出口端口：换点地址属于 proxyRotation 的实现，
