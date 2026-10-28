@@ -44,24 +44,24 @@ docker compose down
 
 ## 站点策略
 
-站点配置位于 `sites/<site>.js`，可提供 `buildUrl`、`parse`、`extractId`、`isBoundary`、`parseTotalPages`、`linkPrefix`、`batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`fallbackOn405` 和 `challenge`。默认策略 `defaultBuildUrl`、`defaultParse`、`defaultExtractId`、`defaultIsBoundary` 内联在 `crawler.js`。注册表 `sites/index.js` 当前只包含 `yfbzb` 和 `ceb`。
+站点配置位于 `sites/<site>.js`，可提供 `buildUrl`、`parse`、`extractId`、`isBoundary`、`blockType`、`parseTotalPages`、`linkPrefix`、`batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`fallbackOn405` 和 `challenge`。默认策略 `defaultBuildUrl`、`defaultParse`、`defaultExtractId`、`defaultIsBoundary` 内联在 `crawler.js`。注册表 `sites/index.js` 当前只包含 `yfbzb` 和 `ceb`。
 
 `yfbzb` 直接使用 `axios`。`ceb` 使用 `axios` 加 `http-proxy-agent`/`https-proxy-agent`，代理优先级为 `PROXY_<SITE>`、`CEB_PROXY_URL`、`PROXY_URL`、`HTTP_PROXY`，并遵守 `NO_PROXY` 白名单。easy_proxies 代理提供方通过 `/api/nodes` 发现健康节点，通过端口轮换换 IP；`POST /api/subscription/refresh` 受冷却时间限制，失败时安全降级。
 
 ## 关键行为约定
 
-- 403 或站点 `isBoundary(error)` 判定表示数据边界，不是网络失败，不重试、不计入失败数，并返回 `endReached`。
+- 403 或站点 `isBoundary(error)` 判定表示数据边界，不是网络失败，不重试、不计入失败数，并返回 `endReached`。站点可用 `blockType(error)` 声明 403 拦截页指纹（`yfbzb` 的 SafeLine `/.safeline/`）：命中时不直接当边界，而是快败为失败页（`shieldType`）；再按页号位置判别——仅 `safeline` 打在已知站点末页（自报总页数；恢复轮无观测时用配置上限兜底）时按边界收尾；其它情况（中间页、配置上限小于真实页数）则连续 2 页熔断并保留断点；`acw` 等其它 shieldType 始终按失败页处理。
 - 网络、超时和 405 才进入重试流程，使用指数退避加全量随机抖动；`backoffDelay()` 的基数为 2 秒，上限为 60 秒。
 - `GET 405` 在 `fallbackOn405` 开启时降级为 `POST`；双 405 快败并尝试换端口，成功换点后重置连续 405 计数。第一页探针会持续换用未尝试节点，直到成功或返回 `gateAbort`；节点池轮尽时 `crawl()` 取消本轮。
 - 连续无状态网络失败达到 `NET_FAIL_SWITCH_THRESHOLD=2` 时换 IP，换点后仍失败达到 `NET_FAIL_BREAK_THRESHOLD=6` 时熔断。
 - WAF 挑战页（HTTP 200 + `_waf_`/`renderData`/`acw_sc__v2`）不是空页：站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 并重放一次；求解失败记为失败页（`shieldType`），连续 2 页熔断。当前仅 `ceb` 启用，求解器在 `sites/_aliyun_waf.js`。
 - 去重以 `id` 为主键：先与今日和昨日 Excel 中的 `readRecentIds(site)` 比较，再在合并写盘时用 `Set` 再次保护，新行优先。
-- `state-<site>.json` 保存 `currentPage` 和 `existingIds`。正常完成时删除；优雅中断、代理熔断或写盘失败时保留，供下次续跑。
+- `state-<site>.json` 保存 `currentPage`、`existingIds` 和可选的 `realTotalPages`（上轮观测到的站点自报总页数）。正常完成时删除；优雅中断、代理熔断或写盘失败时保留，供下次续跑。
 - 输出按 `publishTime` 分组写入 `file/<site>/<date>.xlsx`；历史扁平 `file/*.xlsx` 保留，不迁移。
 
 ## 测试与修改要求
 
-测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 19 个测试套件。
+测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 20 个测试套件。
 
 不要手工编辑 `file/`、`logs/` 或其他运行时生成文件。修改站点时同步检查 `sites/index.js`、`crawler.js`、`README.md` 和相关测试；修改领域术语或架构决策时阅读 `CONTEXT.md` 和相关 `docs/adr/`。
 

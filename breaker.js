@@ -11,7 +11,7 @@
 // record 的契约（调用方如实传整页结果，不得预先归一）：
 // - failed        页面是否失败
 // - status        HTTP 状态；undefined/null 表示没拿到应答（网络级失败）
-// - shieldType    WAF 盾页求解失败标记
+// - shieldType    拦截页类型：'acw'（WAF 挑战求解失败）/ 'safeline'（站点声明的拦截页）
 // - proxySwitched 该页双 405 后已换 IP
 // - endReached    站点边界页（403 等）
 // - emptyPage     HTTP 200 但零行
@@ -32,6 +32,7 @@ function createBreaker(deps = {}) {
 
   let consecutive405 = 0;
   let consecutiveShield = 0;
+  let lastShieldType = '';
   let netFailStreak = 0;
   // 本轮连败是否已尝试过换 IP：保证熔断前至少真换一次，
   // 又不至于每批都切点打转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
@@ -45,6 +46,7 @@ function createBreaker(deps = {}) {
   function noteExitAlive() {
     consecutive405 = 0;
     consecutiveShield = 0;
+    lastShieldType = '';
     netFailStreak = 0;
     netFailSwitched = false;
   }
@@ -62,7 +64,11 @@ function createBreaker(deps = {}) {
       return;
     }
 
-    if (r.shieldType) consecutiveShield++;
+    if (r.shieldType) {
+      consecutiveShield++;
+      // 供熔断日志区分 acw 挑战求解失败与 SafeLine 拦截页
+      lastShieldType = r.shieldType;
+    }
     if (r.status === 405) {
       if (r.proxySwitched) {
         // 换点成功：给新出口一个完整请求的观察窗，避免未验证先熔断
@@ -86,7 +92,8 @@ function createBreaker(deps = {}) {
   //   { ...计数 }                                     继续爬下一批
   async function trip() {
     const counts = snapshot();
-    if (consecutiveShield >= SHIELD_BREAK_THRESHOLD) return { reason: 'shield', ...counts };
+    // lastShieldType 只在盾页熔断时给日志用，不属于快照的汇总计数。
+    if (consecutiveShield >= SHIELD_BREAK_THRESHOLD) return { reason: 'shield', ...counts, lastShieldType };
     if (consecutive405 >= CONSECUTIVE_405_THRESHOLD) return { reason: '405', ...counts };
     if (netFailStreak >= NET_FAIL_SWITCH_THRESHOLD && !netFailSwitched) {
       let sw = { ok: false };

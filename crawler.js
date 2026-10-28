@@ -430,11 +430,22 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       log(`爬取完成第 ${pageNo} 页，共找到 ${pageData.length} 条新数据`, { event: 'page_fetched', context: { page: pageNo, newCount: pageData.length, site: siteName }, site: siteName });
       return { pageData, failed: false, realTotalPages };
     } catch (error) {
+      const errStatus = error.response?.status;
+      // 站点声明的拦截页指纹（如 yfbzb 的 SafeLine）：同样的 403 既可能是真实页尾，
+      // 也可能是速率/深度触发的临时封禁。指纹命中时不能当边界，先快败为失败页——
+      // 同一出口重试只会再吃一发拦截页，连续页数交给 breaker 判定熔断。
+      // 是否最终按边界收尾由 crawl() 的末页位置判别决定（见下方「站点自报的最后一页」）。
+      const blockType = typeof siteConfig.blockType === 'function'
+        ? siteConfig.blockType(error)
+        : null;
+      if (blockType && errStatus === 403) {
+        log(`第 ${pageNo} 页被 ${blockType} 拦截（status=${errStatus}），不视为数据边界，跳过重试`, { level: 'warn', event: 'page_blocked', context: { page: pageNo, shieldType: blockType, status: errStatus, site: siteName }, site: siteName });
+        return { pageData: [], failed: true, status: errStatus, shieldType: blockType };
+      }
       if (isBoundary(error, siteConfig)) {
         log(`第 ${pageNo} 页无新增数据（站点边界），已爬至当日末尾`, { event: 'boundary_403', context: { page: pageNo, site: siteName }, site: siteName });
         return { pageData: [], failed: false, endReached: true };
       }
-      const errStatus = error.response?.status;
       // 405 自动降级：仅显式开启 fallbackOn405 的站点（如 ceb）才切 POST。
       // 降级不消耗 retries：triedFallback 已保证仅降级一次。若在此扣减最后一次重试额度，
       // 循环条件 (retries < maxRetries) 直接为假退出且无返回值（隐式 undefined），
@@ -586,9 +597,11 @@ function loadCheckpoint(site) {
     let ids = raw.existingIds;
     if (!Array.isArray(ids)) ids = [];
     ids = ids.filter(x => typeof x === 'string' && x);
+    const observed = Number(raw.realTotalPages);
     return {
       currentPage: cp,
-      existingIds: new Set(ids)
+      existingIds: new Set(ids),
+      realTotalPages: Number.isInteger(observed) && observed > 0 ? observed : undefined
     };
   } catch (error) {
     log(`断点读取失败，从头开始：${error.message}`, { level: 'warn', event: 'checkpoint_load_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
@@ -596,9 +609,10 @@ function loadCheckpoint(site) {
   }
 }
 
-function saveCheckpoint(site, currentPage, existingIds) {
+function saveCheckpoint(site, currentPage, existingIds, realTotalPages) {
   const file = stateFile(site);
   const state = { currentPage, existingIds: Array.from(existingIds) };
+  if (Number.isInteger(realTotalPages) && realTotalPages > 0) state.realTotalPages = realTotalPages;
   fs.writeFileSync(file, JSON.stringify(state), 'utf8');
 }
 
@@ -738,9 +752,14 @@ async function crawl(a, b, c, d) {
     retryFromPage = retryFromPage === null ? page : Math.min(retryFromPage, page);
   }
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
-  // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置
-  let realTotalPagesObserved;
-  let effectiveTotalPages = totalPages;
+  // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置。
+  // 断点里带上轮观测值：恢复轮可能只从末页起跑，没有成功页可以重新观测。
+  let realTotalPagesObserved = checkpoint && Number.isInteger(checkpoint.realTotalPages)
+    ? checkpoint.realTotalPages
+    : undefined;
+  let effectiveTotalPages = Number.isInteger(realTotalPagesObserved)
+    ? Math.min(totalPages, realTotalPagesObserved)
+    : totalPages;
 
   while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
     const batchStartPage = currentPage;
@@ -762,20 +781,51 @@ async function crawl(a, b, c, d) {
     let failedCount = 0;
     let batchEndReached = false;
 
+    // 站点自报真实总页数先于逐页判定合并：后观测覆盖前观测，每批重算有效上限；
+    // 收窄到低于当前页时由循环条件自然退出（等价于「已到底」）。
+    // 必须在逐页判定之前——同一批里第 99 页的观测要先于第 100 页生效，
+    // 否则配置 totalPages 大于真实页数时，末页的 SafeLine 拦截会被误判为中途失败，
+    // 断点卡在末页，下一轮不再从第 1 页抓新数据。
+    for (const r of results) {
+      const rt = r && r.realTotalPages;
+      if (Number.isInteger(rt) && rt > 0) realTotalPagesObserved = rt;
+    }
+    if (realTotalPagesObserved !== undefined) {
+      const nextCap = Math.min(totalPages, realTotalPagesObserved);
+      if (nextCap !== effectiveTotalPages) {
+        effectiveTotalPages = nextCap;
+        log(`站点 [${site}] 分页显示真实总页数 ${realTotalPagesObserved}，按 min(${realTotalPagesObserved}, 配置 ${totalPages})=${nextCap} 页爬取`, { event: 'real_total_pages', context: { site, realTotalPages: realTotalPagesObserved, configuredTotalPages: totalPages, effectiveTotalPages: nextCap }, site });
+      }
+    }
+
     for (let i = 0; i < results.length; i++) {
-      const { pageData, failed, endReached: ended, status } = results[i];
       const pageNo = batchStartPage + i;
+      let result = results[i];
+      // 拦截页打在站点自报的最后一页：其后再无数据，按数据边界收尾。
+      // 否则真实页尾（yfbzb 第 100 页的 SafeLine 403）每轮都会变成失败页并卡住断点。
+      // 这是位置判别，不是指纹判别——指纹本身分不出页尾和临时封禁。
+      // 只限 safeline：acw 挑战求解失败是访问故障，末页被吞会删断点并永久漏数据。
+      // 基准优先用站点自报的总页数，不能用 effectiveTotalPages（含配置上限）：
+      // 配置小于真实页数时，上限处的拦截是真实页被拦，不是「已到底」。
+      // 断点没有总页数（旧文件，或上轮从未成功观测）时退化为配置上限：
+      // 恢复轮从末页起跑时没有成功页可重新观测，若仍按失败处理，断点会永停末页。
+      const lastKnownPage = Number.isInteger(realTotalPagesObserved) ? realTotalPagesObserved : totalPages;
+      if (result.failed && result.shieldType === 'safeline' && pageNo >= lastKnownPage) {
+        log(`第 ${pageNo} 页已是站点最后一个有效页，被 ${result.shieldType} 拦截，按数据边界收尾`, { level: 'warn', event: 'boundary_blocked_last_page', context: { page: pageNo, shieldType: result.shieldType, status: result.status, site }, site });
+        result = { pageData: [], failed: false, endReached: true };
+      }
+      const { pageData, failed, endReached: ended, status } = result;
 
       // 先把页面结果交给 breaker 记账，它内部维护 405 连击/盾页/网络连败与内容成功页数。
       // 直接传整页结果：record 的契约就是「读哪些字段」，多带的字段它不看。
-      const proxy405Switches = breaker.record(results[i]);
+      const proxy405Switches = breaker.record(result);
 
       if (failed) {
         failedCount++;
         totalFailed++;
         noteRetryPage(pageNo);
         // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
-        if (results[i].gateAbort) {
+        if (result.gateAbort) {
           gateAborted = true;
           log(`第一页在所有代理节点上均失败，判定出口全部不可用，取消本次抓取 [${site}]`, { level: 'error', event: 'first_page_gate_abort', context: { site, page: pageNo }, site });
           shouldStopCrawling = true;
@@ -783,10 +833,10 @@ async function crawl(a, b, c, d) {
           continue;
         }
         // 换点成功即时回报（计数早已在 breaker 里重置；record() 把累计次数带回来）
-        if (status === 405 && results[i].proxySwitched) {
+        if (status === 405 && result.proxySwitched) {
           log(`第 ${pageNo} 页双 405 但已换 IP，重置连续拦截计数，新出口观察中（本轮已换 ${proxy405Switches} 次）`, { level: 'warn', event: 'proxy_switched_reset_405', context: { page: pageNo, site, switches: proxy405Switches }, site });
         }
-        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status, proxySwitched: !!results[i].proxySwitched, proxyExhausted: !!results[i].proxyExhausted, shield: !!results[i].shieldType }, site });
+        log(`第 ${pageNo} 页爬取失败，已跳过`, { level: 'warn', event: 'page_skipped', context: { page: pageNo, site, status, proxySwitched: !!result.proxySwitched, proxyExhausted: !!result.proxyExhausted, shield: !!result.shieldType }, site });
         continue;
       }
 
@@ -828,20 +878,6 @@ async function crawl(a, b, c, d) {
 
     currentPage = batchStartPage + pagesToCrawl;
 
-    // 站点自报真实总页数合并：后观测覆盖前观测，每批重算有效上限；
-    // 收窄到低于当前页时由循环条件自然退出（等价于「已到底」）
-    for (const r of results) {
-      const rt = r && r.realTotalPages;
-      if (Number.isInteger(rt) && rt > 0) realTotalPagesObserved = rt;
-    }
-    if (realTotalPagesObserved !== undefined) {
-      const nextCap = Math.min(totalPages, realTotalPagesObserved);
-      if (nextCap !== effectiveTotalPages) {
-        effectiveTotalPages = nextCap;
-        log(`站点 [${site}] 分页显示真实总页数 ${realTotalPagesObserved}，按 min(${realTotalPagesObserved}, 配置 ${totalPages})=${nextCap} 页爬取`, { event: 'real_total_pages', context: { site, realTotalPages: realTotalPagesObserved, configuredTotalPages: totalPages, effectiveTotalPages: nextCap }, site });
-      }
-    }
-
     // 只在「本批没到底」时才问熔断器：trip() 可能真的去换 IP（网络连败阈值），
     // 而触达边界的批次已经在收尾，换点既用不上也没人再验证新出口——
     // 白白烧掉一次换点预算，日志里还只字不提。边界优先，连问都不问。
@@ -855,8 +891,11 @@ async function crawl(a, b, c, d) {
       endReached = true;
       shouldStopCrawling = true;
     } else if (trip.reason === 'shield') {
-      // 盾页连续不可解：换 IP 也只会拿到同样的盾，避免烧掉整池出口
-      log(`连续 ${trip.consecutiveShield} 页 WAF 挑战求解失败，判定盾页不可解，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield: trip.consecutiveShield, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
+      // 盾页连续不可解 / 拦截页连续命中：换 IP 也只会拿到同样的页，避免烧掉整池出口
+      const shieldSummary = trip.lastShieldType === 'safeline'
+        ? `连续 ${trip.consecutiveShield} 页被 SafeLine 拦截`
+        : `连续 ${trip.consecutiveShield} 页 WAF 挑战求解失败`;
+      log(`${shieldSummary}，判定访问被拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield: trip.consecutiveShield, shieldType: trip.lastShieldType || null, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
       noteRetryPage(batchStartPage);
     } else if (trip.reason === '405') {
@@ -893,7 +932,7 @@ async function crawl(a, b, c, d) {
     }
 
     if (!shouldStopCrawling) {
-      saveCheckpoint(site, currentPage, existingIds);
+      saveCheckpoint(site, currentPage, existingIds, realTotalPagesObserved);
     }
 
     if (stopping) {
@@ -931,7 +970,7 @@ async function crawl(a, b, c, d) {
   const endReachedCleanly =
     endReached && fileWriteFailed === 0 && !stoppedBySignal && !retryPointsAtRealPages;
   if (!endReachedCleanly && (stoppedBySignal || retryFromPage !== null || fileWriteFailed > 0)) {
-    saveCheckpoint(site, checkpointPage, existingIds);
+    saveCheckpoint(site, checkpointPage, existingIds, realTotalPagesObserved);
     const checkpointLevel = fileWriteFailed > 0 ? 'error' : 'warn';
     const checkpointEvent = fileWriteFailed > 0
       ? 'checkpoint_retained_on_file_error'

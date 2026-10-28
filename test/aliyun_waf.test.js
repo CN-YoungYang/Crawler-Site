@@ -4,7 +4,8 @@
 // (c) 求解失败必须记为失败页（shieldType），不得退化成「0 行成功」的静默失败
 // (d) 连续 2 页求解失败熔断，不空转烧掉整池出口
 const assert = require('assert');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
+const fs = require('fs');
+const { mockAxios, freshCrawler, withTempCwd, readEvents } = require('./helper');
 
 const waf = require('../sites/_aliyun_waf');
 const ceb = require('../sites/ceb');
@@ -147,12 +148,42 @@ async function testCircuitBreaksAfterTwoShieldFailures() {
   }
 }
 
+// (e) 末页求解失败不得被 SafeLine 的末页边界规则吞掉：仍记失败页并保留断点。
+// 位置规则只适用于 shieldType=safeline（yfbzb 的确定性页码上限）；acw 是求解失败，
+// 末页被吞会删断点并永久漏掉该页数据。
+async function testLastPageUnsolvedChallengeKeepsCheckpoint() {
+  const SITE = 'ceblast';
+  const restore = mockAxios(() => ({ data: UNSOLVABLE_HTML, status: 200, headers: {} }));
+  const sitesIndex = require('../sites');
+  sitesIndex.registry[SITE] = { ...cebTestConfig(), name: SITE, batchSize: 1 };
+  try {
+    const { crawl } = freshCrawler();
+    await withTempCwd(async () => {
+      await crawl({ site: SITE, totalPages: 1, interval: 0, maxRetries: 1 });
+      const events = readEvents(SITE);
+      const end = events.filter(e => e.event === 'crawl_end').pop();
+      assert.strictEqual(end.endReached, false, '末页求解失败不是数据边界');
+      assert.strictEqual(end.totalFailed, 1, '末页求解失败必须计入失败页');
+      assert.ok(
+        !events.some(e => e.event === 'boundary_blocked_last_page'),
+        'acw 不适用 SafeLine 的末页边界规则'
+      );
+      const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+      assert.strictEqual(state.currentPage, 1, '断点应保留在失败页，供下轮续跑');
+    });
+  } finally {
+    delete sitesIndex.registry[SITE];
+    restore();
+  }
+}
+
 async function main() {
   await testDetectAndSolve();
   await testCrawlPageReplaysAfterSolve();
   await testUnsolvedChallengeIsFailure();
   await testReplayBlockedIsShieldFailure();
   await testCircuitBreaksAfterTwoShieldFailures();
+  await testLastPageUnsolvedChallengeKeepsCheckpoint();
   console.log('阿里云 WAF 挑战（识别/求解/重放/失败与熔断）：通过');
 }
 

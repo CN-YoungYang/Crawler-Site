@@ -20,6 +20,25 @@ function parseTotalPages($, html, siteConfig) {
   return maxPage > 0 ? maxPage : null;
 }
 
+// SafeLine（雷池 WAF）拦截页指纹。实测（.scratch/yfbzb-live-probe/FINDINGS.md）：
+// 第 100 页的「页码上限」与临时封禁返回同一张拦截页，响应体引用 /.safeline/ 静态资源。
+// 因此指纹只能说明「被 SafeLine 拦了」，分不出是页尾还是临时封禁；
+// 二者只能由页号位置区分（末页按边界收尾、中间按失败页处理，见 crawler.js）。
+const SAFELINE_FINGERPRINT = '/.safeline/';
+
+function responseBody(error) {
+  const data = error && error.response && error.response.data;
+  if (data == null) return '';
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (typeof data === 'string') return data;
+  try { return JSON.stringify(data); } catch (_) { return String(data); }
+}
+
+function isSafeLineBlock(error) {
+  return !!(error && error.response && error.response.status === 403
+    && responseBody(error).includes(SAFELINE_FINGERPRINT));
+}
+
 module.exports = {
   name: 'yfbzb',
   displayName: '乙方宝·湖北',
@@ -38,11 +57,20 @@ module.exports = {
   // 可选策略钩子（全部可选，缺省走 crawler.js 内联默认行为）：
   // buildUrl(pageNo) { return `${this.baseUrl}${pageNo}${this.urlSuffix}`; },
   // extractId(link) { return link.split('/').pop().split('.')[0]; },
-  // isBoundary(error) { return error?.response?.status === 403; },
   // parse($, html, existingIds) { /* 接管整页解析，返回 pageData[] */ },
   // batchSize: 10,
   // failureThreshold: 2,
   // timeout: 30000,
   // headers: { 'User-Agent': '...' },
+  // 403 默认是数据边界；命中 SafeLine 指纹时不能断定「到底了」——临时封禁也长这样。
+  // 交回 crawler 按失败页处理，由页号位置决定是否按边界收尾。
+  isBoundary(error) {
+    if (!error || !error.response || error.response.status !== 403) return false;
+    return !isSafeLineBlock(error);
+  },
+  // 拦截页类型：crawler 据此快败为失败页（shieldType），连续 2 页交给 breaker 熔断。
+  blockType(error) {
+    return isSafeLineBlock(error) ? 'safeline' : null;
+  },
   parseTotalPages
 };

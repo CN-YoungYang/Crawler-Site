@@ -72,6 +72,16 @@ async function main() {
     assert.strictEqual((await b.trip()).reason, 'shield', '连续 2 页盾页不可解应熔断');
   }
 
+  // ---- (d2) trip() 带回最近一次盾页类型：SafeLine 与 acw 的日志措辞不同 ----
+  {
+    const b = createBreaker({ switchProxy: async () => ({ ok: false }) });
+    b.record({ failed: true, shieldType: 'acw' });
+    b.record({ failed: true, shieldType: 'safeline' });
+    const t = await b.trip();
+    assert.strictEqual(t.reason, 'shield');
+    assert.strictEqual(t.lastShieldType, 'safeline', 'trip() 应带回最近一页的盾页类型');
+  }
+
   // ---- (e) 网络连败：先换 IP 再观察，仍连败才熔断（阈值不同） ----
   {
     let switches = 0;
