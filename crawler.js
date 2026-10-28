@@ -382,6 +382,9 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
         }
         const replayHeaders = { ...headers, ...(solved.headers || {}) };
         try {
+          // 重放也是一发真实请求：与冷请求同样受站点 requestDelay 节流，
+          // 否则 ceb 每页两发背靠背，WAF 压力翻倍。
+          await maybeThrottle();
           response = await axios.get(solved.url, { timeout, headers: replayHeaders, ...axiosProxyOpts });
         } catch (e) {
           // 重放拿到 HTTP 状态（尤其 405）= 盾未通过；交回 405/POST 流程只会多打一发并延长封禁。

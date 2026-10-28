@@ -130,6 +130,30 @@ async function testReplayBlockedIsShieldFailure() {
   }
 }
 
+// (f) 重放请求同样受站点 requestDelay 节流：每页两发之间必须有间隔。
+// 冷请求前的节流只覆盖第一发；若重放直发，ceb 每页实际是两次背靠背请求。
+async function testReplayIsThrottled() {
+  const calls = [];
+  const restore = mockAxios(() => {
+    calls.push(Date.now());
+    if (calls.length === 1) {
+      return { data: CHALLENGE_HTML, status: 200, headers: { 'set-cookie': ['acw_tc=abc123; path=/'] } };
+    }
+    return { data: cebPage([cebRow('a1', '湖北某项目招标公告', '2026-10-25')]), status: 200, headers: {} };
+  });
+  try {
+    const { crawlPage } = freshCrawler();
+    const config = cebTestConfig({ requestDelay: { min: 100, max: 100 } });
+    const result = await withTempCwd(() => crawlPage(1, config, new Set(), 1));
+    assert.strictEqual(result.failed, false, '解盾重放成功后不应记失败');
+    assert.strictEqual(calls.length, 2, '应为「原请求 + 签名重放」两次');
+    const gap = calls[1] - calls[0];
+    assert.ok(gap >= 80, `重放前应按 requestDelay 节流，实际间隔 ${gap}ms`);
+  } finally {
+    restore();
+  }
+}
+
 async function testCircuitBreaksAfterTwoShieldFailures() {
   let calls = 0;
   const restore = mockAxios(() => {
@@ -182,6 +206,7 @@ async function main() {
   await testCrawlPageReplaysAfterSolve();
   await testUnsolvedChallengeIsFailure();
   await testReplayBlockedIsShieldFailure();
+  await testReplayIsThrottled();
   await testCircuitBreaksAfterTwoShieldFailures();
   await testLastPageUnsolvedChallengeKeepsCheckpoint();
   console.log('阿里云 WAF 挑战（识别/求解/重放/失败与熔断）：通过');
