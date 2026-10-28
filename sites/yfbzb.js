@@ -26,6 +26,12 @@ function parseTotalPages($, html, siteConfig) {
 // 二者只能由页号位置区分（末页按边界收尾、中间按失败页处理，见 crawler.js）。
 const SAFELINE_FINGERPRINT = '/.safeline/';
 
+// 2026-10-28 生产日志：yfbzb 第 61-99 页连续返回 468，重试期间持续命中；
+// 第 100 页仍是 SafeLine 403。468 不是标准 HTTP 状态，常见于 WAF/风控拦截，
+// 与 SafeLine 一样不能当普通失败页逐页重试——否则一批 10 页各打 3 次，
+// 既扩大封禁又让 breaker 看不到「连续拦截」而空转到站点末页。
+const RATE_LIMIT_STATUS = 468;
+
 function responseBody(error) {
   const data = error && error.response && error.response.data;
   if (data == null) return '';
@@ -37,6 +43,10 @@ function responseBody(error) {
 function isSafeLineBlock(error) {
   return !!(error && error.response && error.response.status === 403
     && responseBody(error).includes(SAFELINE_FINGERPRINT));
+}
+
+function isRateLimitBlock(error) {
+  return !!(error && error.response && error.response.status === RATE_LIMIT_STATUS);
 }
 
 module.exports = {
@@ -69,7 +79,9 @@ module.exports = {
     return !isSafeLineBlock(error);
   },
   // 拦截页类型：crawler 据此快败为失败页（shieldType），连续 2 页交给 breaker 熔断。
+  // 468 是站点级风控拦截（不是页尾），绝不能被 isBoundary 当作数据边界。
   blockType(error) {
+    if (isRateLimitBlock(error)) return 'http468';
     return isSafeLineBlock(error) ? 'safeline' : null;
   },
   parseTotalPages

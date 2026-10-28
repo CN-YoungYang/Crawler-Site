@@ -155,9 +155,18 @@ module.exports = {
   timeout: 30000,
   // 发请求前随机抖动（crawler.js 识别此字段）
   requestDelay: { min: 2500, max: 5500 },
-  // 405 容错：GET 被 WAF 拒时自动降级为 POST
+  // 主动按页轮换：CEB 每页是「冷请求 + 解盾重放」两发，不能把整轮都压在同一个出口。
+  // 每 10 页左右换一个节点，先于 WAF 触发换 IP，而不是等 405 才换。
+  rotateEveryPages: 10,
+  // 第一页探针最多尝试 3 个节点；其余节点留给后续轮次，避免一次把整池打一遍。
+  firstPageProbeLimit: 3,
+  // 405 是出口 IP 级封禁，换 HTTP 方法无意义：直接冷却当前节点并换 IP。
+  // 2026-09-22 生产日志中每一次 fallback_post 都紧跟 page_failed_dual405，
+  // POST 从未成功，只是在已封出口上多打一发、延长封禁。
   method: 'GET',
-  fallbackOn405: true,
+  failFast405: true,
+  // 其它站点若确有「仅 GET 405、POST 放行」的形态，仍可开 fallbackOn405。
+  fallbackOn405: false,
   // 阿里云 WAF acw 挑战：干净出口首次请求返回 200 盾页，
   // 必须在沙箱内求解签名 URL 后重放；求解失败由 crawler 记为失败页并熔断。
   challenge: {

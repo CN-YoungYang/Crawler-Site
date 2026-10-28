@@ -24,7 +24,7 @@ function rotationKey(site) {
 }
 
 function makeSwitchResult(overrides) {
-  return { ok: false, from: '', to: '', exhausted: false, stale: false, ...overrides };
+  return { ok: false, from: '', to: '', exhausted: false, stale: false, allCooled: false, ...overrides };
 }
 
 // 「本次换点未经验证」的日志后缀：唯一来源，六处调用点都用它。
@@ -104,8 +104,11 @@ function createRotation(site, siteConfig, deps = {}) {
     return next;
   }
 
-  function reset() {
-    tried = [];
+  // keepTried：保留本轮已使用的节点集合。主动按页轮换时必须在成功页后保留，
+  // 否则每次 reset 都从池头重新选，只会在节点一/节点二之间来回跳；
+  // 失败换点后的成功页若清空，也会让刚被 405 拦过的节点重新进入候选。
+  function reset(options = {}) {
+    if (!options.keepTried) tried = [];
     leafSnapshot = null;
   }
 
@@ -124,7 +127,7 @@ function createRotation(site, siteConfig, deps = {}) {
     return resolveProxyUrl ? resolveProxyUrl(siteConfig) : '';
   }
 
-  async function doSwitch(reason) {
+  async function doSwitch(reason, options = {}) {
     const proxyUrl = currentProxyUrl();
     if (!proxyUrl) return makeSwitchResult();
     const provider = getProxyProvider ? getProxyProvider(siteConfig, proxyUrl) : null;
@@ -139,14 +142,15 @@ function createRotation(site, siteConfig, deps = {}) {
         reason,
         proxyUrl,
         tried: [...tried],
-        cached: leafSnapshot
+        cached: leafSnapshot,
+        keepCurrentIfHealthy: !!options.keepCurrentIfHealthy
       });
     } catch (e) {
       logFn(`代理切换异常 [${key}] ${reason}：${e.message}`, { level: 'warn', event: 'proxy_switch_failed', context: { site: key, reason, error: e.message }, site: key });
       return makeSwitchResult();
     }
     if (!out || out.noop) return makeSwitchResult();
-    if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true, stale: out.source === 'snapshot' });
+    if (out.exhausted) return makeSwitchResult({ from: out.from || '', exhausted: true, allCooled: !!out.allCooled, stale: out.source === 'snapshot' });
 
     // 换点成功：记下新出口地址，使后续请求真的走新节点端口
     if (typeof out.proxyUrl === 'string' && out.proxyUrl.trim()) {
@@ -172,7 +176,7 @@ function createRotation(site, siteConfig, deps = {}) {
 
   return {
     key,
-    switch: reason => withLock(() => doSwitch(reason)),
+    switch: (reason, options) => withLock(() => doSwitch(reason, options)),
     reset,
     dispose,
     currentProxyUrl

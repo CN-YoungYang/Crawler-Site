@@ -12,7 +12,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 总导航 + 站点报告：`file/index.html` 总导航（按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
 - 轻量静态服务：`server.js`（零依赖 `http`）托管 `file/` 于 `HTTP_PORT`（默认 8080，`EXPOSE 8080`），路由 `/` → 总导航、`/yfbzb/`/`/ceb/` → 各站报告、`HEAD` 支持、`xlsx` 下载头、防路径穿越，`HTTP_ENABLED=false` 可禁用；`docker-compose.yml` 已配 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` 与 `healthcheck`，适合由外部反代（Nginx/Caddy/Traefik）将 `80/443 → 8080` 以域名暴露
 - 轻量健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}`（`no-store`），不在高频探针中扫描 xlsx；供 `docker healthcheck`、反代后端摘除与监控告警使用
-- 失败页与“数据到底”分离识别：页尾 403（数据边界）不再误判为加载失败；SafeLine 拦截页在中间页按失败页计数，打在站点自报的最后一页则按边界收尾，不会因单页失败而提前终止整次爬取
+- 失败页与“数据到底”分离识别：页尾 403（数据边界）不再误判为加载失败；SafeLine 拦截页在中间页按失败页计数，打在站点自报的最后一页则按边界收尾；HTTP 468 风控拦截按失败页快败并连续 2 页熔断，绝不当作数据边界
 - 失败日志带 `error.code` / HTTP `status`，便于诊断
 - 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds` + 可选 `realTotalPages`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
 - 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
@@ -66,7 +66,7 @@ node index.js
 | `INTERVAL_MS` / `INTERVAL` | 5000 | 同位置参数 2；支持每站覆盖 `INTERVAL_MS_<SITE>` |
 | `MIN_DELAY_S` / `MIN_DELAY` | 0 | 同位置参数 3；支持每站覆盖 `MIN_DELAY_S_<SITE>` |
 | `MAX_DELAY_S` / `MAX_DELAY` | 300 | 同位置参数 4；支持每站覆盖 `MAX_DELAY_S_<SITE>` |
-| `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（如 `0 2 * * *` 表每日 02:00）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_CEB="0 3 * * *"`）或 `SITES_CONFIG` JSON |
+| `CRON_EXPR` / `CRON` | 空 | 定时表达式，仅支持 `m h * * *`（日/月/周必须为 `*`；m/h 支持 `*`、逗号、区间、步长，如 `35 3,15 * * *` 表每日 03:35/15:35）；为空则单次运行后常驻等待；支持每站独立 `CRON_<SITE>`（如 `CRON_YFBZB="0 2 * * *"` `CRON_CEB="35 3,15 * * *"`）或 `SITES_CONFIG` JSON |
 | `HTTP_PORT` / `PORT` | 8080 | 静态服务监听端口（托管 `file/`，`EXPOSE 8080`，`ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"`）；由外部反代将 `80/443 → HTTP_PORT` 以域名暴露 |
 | `HTTP_ENABLED` | true | 设为 `false` 禁用内置静态服务（仅保留爬取与报告生成） |
 | `TZ` | `Asia/Shanghai` | 容器时区，必须与 `Dockerfile` `ENV TZ` 一致，否则日期分区错一天 |
@@ -75,14 +75,15 @@ node index.js
 | `EASY_PROXIES_PASSWORD` | 空 | 仅当 easy_proxies 管理面设置密码时填写；不要提交到仓库 |
 | `EASY_PROXIES_REFRESH_COOLDOWN` | 600 秒 | 订阅刷新成功后的限频窗口。刷新失败不写冷却；**超时例外**——POST 已送达、服务端多半仍在执行，超时同样写冷却，避免每轮重复阻塞 |
 | `EASY_PROXIES_REFRESH_TIMEOUT` | 60 秒 | `POST /api/subscription/refresh` 的独立超时。该接口会同步等待订阅拉取 + 健康检查，不能沿用 `/api/nodes` 的 2 秒 |
+| `EASY_PROXIES_NODE_COOLDOWN_MS` | 43200000（12 小时） | HTTP 405 命中节点按 `站点|tag` 冷却的时长（毫秒）。CEB 实测封禁曾持续 >8h53m，可调到 `86400000`（24 小时）；全部节点冷却时本轮暂停 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 空 | 通用代理与直连白名单；站点专用 `CEB_PROXY_URL` / `PROXY_CEB` 优先级更高 |
 
 ```bash
 SITES=yfbzb TOTAL_PAGES=100 INTERVAL_MS=5000 MIN_DELAY_S=0 MAX_DELAY_S=300 CRON_EXPR="0 2 * * *" node index.js
 # 每站独立定时与页数
-SITES=yfbzb,ceb CRON_YFBZB="0 2 * * *" CRON_CEB="0 3 * * *" TOTAL_PAGES_CEB=50 node index.js
+SITES=yfbzb,ceb CRON_YFBZB="0 2 * * *" CRON_CEB="35 3,15 * * *" TOTAL_PAGES_CEB=20 INTERVAL_MS_CEB=10000 node index.js
 # 或 JSON 方式
-SITES=yfbzb,ceb SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"ceb":{"cron":"0 3 * * *","totalPages":50}}' node index.js
+SITES=yfbzb,ceb SITES_CONFIG='{"yfbzb":{"cron":"0 2 * * *"},"ceb":{"cron":"35 3,15 * * *","totalPages":20,"interval":10000}}' node index.js
 ```
 
 ### Docker / Compose（推荐）
@@ -166,20 +167,20 @@ server {
 1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点警告后跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
-   - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `isBoundary`/`blockType`（SafeLine 403）与 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
+   - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `isBoundary`/`blockType`（SafeLine 403 / HTTP 468）与 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时/405 最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`axios` 站点的 `GET 405` 在 `fallbackOn405:true` 时切 `POST`（不消耗 `retries`，有终局兜底），双 405 快败 + 连续 405 熔断（≥2 页 405 即停）避免空刷且换点成功重置观察窗；第一页遇到双 405 或网络失败会持续按序换用未试过的健康端口，每次换点重置该页重试额度，成功或节点池轮尽为止，轮尽返回 `gateAbort` 并取消本轮抓取。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。订阅刷新后额外读 `GET /api/subscription/status`，把实际 `node_count`/`refresh_count`/`last_error` 记入日志；节点数为 0 **或** `last_error` 非空（订阅拉取失败但仍回退旧缓存，`node_count` 不为 0）时降级为 `warn`，状态接口不可达不影响刷新判定。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`GET 405` 在 `failFast405:true` 的站点（`ceb`）直接冷却当前节点并换 IP（不再发 POST），其它站点可在 `fallbackOn405:true` 时先降级 `POST`（不消耗 `retries`，有终局兜底）；单发 405（`failFast405`）或 GET→POST 双 405 换点未果时连续 405 熔断（≥2 页 405 即停），非首页每页只重试一次（第二次 405 只冷却节点、不重试），避免逐页烧节点却不熔断；第一页遇到 405 或网络失败会按序换用未试过的健康端口，每次换点重置该页重试额度，尝试节点数受 `firstPageProbeLimit` 限制（`ceb` 为 3），达到上限、节点池轮尽或全部节点冷却时返回 `gateAbort` 并暂停本轮抓取；非首页换点发现全部节点冷却时也立即暂停本轮并保留断点；轮首若基础端口节点仍在冷却期，会先切到健康节点再发第一条请求。主动轮换遇到全冷却同样暂停本轮。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。订阅刷新后额外读 `GET /api/subscription/status`，把实际 `node_count`/`refresh_count`/`last_error` 记入日志；节点数为 0 **或** `last_error` 非空（订阅拉取失败但仍回退旧缓存，`node_count` 不为 0）时降级为 `warn`，状态接口不可达不影响刷新判定。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
      - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
-     - 第 1 页探针因节点池轮尽返回 `gateAbort`，本轮以 `first_page_gate_abort` 结束
+     - 第 1 页探针因节点上限（`firstPageProbeLimit`）、节点池轮尽或全部节点冷却返回 `gateAbort`，本轮以 `first_page_probe_limited` / `first_page_gate_abort` / `first_page_all_cooled` 结束；非首页换点遇到全冷却以 `all_nodes_cooled` 暂停
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
    - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds` + 可选 `realTotalPages`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。断点只前移不越过失败页——熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败与第一页探针轮尽都保留全部批次中最早的失败页，避免失败页被跳过后再也不重爬。
    - **优雅退出**：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 发送 `SIGTERM` 同理。
 
-### 关于 403（重要）
+### 关于 403 与 468（重要）
 
 **目标站点对 `pageNo` 超出“当日可访数据”的请求返回 403，这是正常的数据边界信号，不是加载失败。**
 
@@ -187,8 +188,9 @@ server {
 
 - 打在已知站点末页（站点自报的最后一页或之后；恢复轮无成功页可观测时用配置 `TOTAL_PAGES` 兜底）：按数据边界收尾（`endReached`），不重试、不计失败；边界前若有失败页，断点仍指向最早失败页。JSONL 记 `boundary_blocked_last_page`（`warn`）；
 - 其它情况（中间页、配置上限小于真实页数）：快败为失败页（同一出口重试只会再吃拦截页），连续 2 页触发熔断并保留断点，避免临时封禁被当成“已到底”而静默漏数据；
+- HTTP 468 是站点风控拦截（2026-10-28 生产日志：`yfbzb` 第 61-99 页连续命中）：`blockType` 返回 `http468`，快败为失败页、计入连续盾页，连续 2 页熔断并保留断点；468 永不按数据边界收尾；
 - 没有 SafeLine 指纹的 403 仍是普通数据边界：不重试，标记 `endReached` 并干净停止；
-- 网络/超时/405 才进入重试与退避；SafeLine 拦截页不重试——中间页计入失败页数，已知站点末页按边界收尾、不计失败。
+- 网络/超时才进入重试与退避；405 不在同一出口上重试——`ceb` 单发 405 即冷却节点并换 IP（`failFast405`），其它站点按 `fallbackOn405` 决定是否降级 POST；SafeLine 403 与 HTTP 468 拦截页不重试——SafeLine 中间页计入失败页数、已知末页按边界收尾，468 始终计入失败页并熔断。
 
 已知站点特性：`yfbzb` 自报 100 页，实际只有 99 页可访问（第 100 页恒为 SafeLine 拦截），这是分页控件与实际数据的 1 页差，无需据此调整 `TOTAL_PAGES`。
 
@@ -216,7 +218,7 @@ server {
 | `BACKOFF_CAP_MS` | 60000 | 退避封顶（毫秒） |
 | `USER_AGENT` | Chrome 131 | 请求 UA，避免默认 axios UA 被一眼识别为爬虫；可被站点 `headers` 覆盖 |
 
-> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 双 405 快败/连续熔断 + easy_proxies 多端口换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空轮换记忆；代理隧道按站隔离）+ 阿里云 acw 盾页沙箱求解（`sites/_aliyun_waf.js`），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
+> `ceb` 站串行（`batchSize:1`）+ `requestDelay: {min:2500, max:5500}` 随机抖动 + 单发 405 快败（`failFast405`，不做 GET→POST）/连续熔断 + easy_proxies 多端口换 IP（`CEB_PROXY_URL`；管理 API 9091，节点端口从 24000 开始，轮尽零请求短路，成功页清空节点快照；主动轮换站点保留已试节点，避免回到刚被 405 的节点；代理隧道按站隔离）+ 阿里云 acw 盾页沙箱求解（`sites/_aliyun_waf.js`），配合 `isBoundary` 的 429 重试语义降低限频与空刷风险；`yfbzb` 仍为 `axios` 并发。
 
 ## 目录结构
 
@@ -233,10 +235,11 @@ crawler/
 │   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + isBoundary/blockType/parseTotalPages + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 20 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 25 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── safeline403.test.js  # SafeLine 403：末页按边界、中间页失败并熔断
+│   ├── yfbzb468.test.js     # HTTP 468 风控：快败、连续 2 页熔断、绝不判边界
 │   ├── circuit405.test.js   # 双 405 熔断器（连续 2 页即提前结束）
 │   ├── breaker.test.js      # 熔断判定模块（405/盾页/网络连败/边界语义）
 │   ├── boundaryPrecedence.test.js # 边界优先于熔断：同批 403 + 405 仍记 endReached 且不留断点
@@ -244,7 +247,11 @@ crawler/
 │   ├── crawlEndLevel.test.js # crawl_end 汇总分级（整轮无有效成功页 → warn）
 │   ├── subscriptionRefresh.test.js # 订阅刷新透出节点数/订阅错误（空池降级 warn）
 │   ├── staleSnapshot.test.js # 陈旧快照换点须标注 source=snapshot
-│   └── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
+│   ├── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
+│   ├── proxySchedule.test.js # 主动按页轮换（rotateEveryPages）
+│   ├── firstPageProbeLimit.test.js # 首页探针限次
+│   ├── nodeCooldown.test.js # 405 节点冷却（跨轮跳过）
+│   └── failFast405.test.js  # ceb 单发 405 快败：换点/探针限次/防连击清零
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）
 ├── docker-compose.yml    # 双服务 easy_proxies(默认启用，多端口业务端口 24000+，管理 API 9091) + crawler 一容器多站点并发编排
 ├── DEPLOY.md             # Docker Compose 部署、验证、更新与故障排查手册
@@ -258,6 +265,9 @@ crawler/
 │   ├── adr/0002-ceb-keep-legacy-source.md # ceb 旧源与 ctbpsp 切换结论
 │   ├── adr/0003-ceb-aliyun-waf-challenge.md # ceb 阿里云 WAF 挑战求解
 │   ├── adr/0004-yfbzb-safeline-403-boundary.md # yfbzb SafeLine 403 末页边界判别
+│   ├── adr/0005-yfbzb-http468-rate-limit.md   # yfbzb HTTP 468 风控拦截快败并熔断
+│   ├── adr/0006-proxy-rotation-policy.md     # 代理主动按页轮换、首页探针限次与 405 节点冷却
+│   ├── adr/0007-ceb-405-fastfail.md          # ceb 405 快败：跳过 GET→POST 降级
 │   ├── progress-ceb-ctbpsp.md              # ctbpsp 迁移终止与归档说明
 │   └── agents/domain.md / issue-tracker.md
 ├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（绑定挂载持久化，server.js 托管）
@@ -273,7 +283,7 @@ crawler/
 
 - 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
-- `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（如 `0 2 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
+- `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（日/月/周必须为 `*`；m/h 支持 `*`、逗号、区间、步长，如 `35 3,15 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等）：`ceb` 已内置阿里云 acw 盾页求解（`sites/_aliyun_waf.js`，vm 沙箱、5s 超时），并经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用多端口换 IP 兜底（管理 API `9091`，空节点池/管理面不可达时安全降级）；挑战连续 2 页不可解时熔断，不空转烧 IP。其余站点直连。
 - 总导航 `file/index.html` 由 `report.js#generateNav` 按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，缺失站点报告自动补空占位；健康探针 `GET /health` 只检查进程、导航文件和生成时间，不扫描 xlsx，`totals`/`sites` 为空值仅为兼容字段。
 - 测试使用 Node 内置断言，运行 `npm test` 或 `node test/run.js`；`SITES` 中列出未在 `sites/index.js` 注册的站点会警告后跳过，单站点 `SITE=<未知>` 则快速失败。

@@ -6,9 +6,14 @@ const { log } = require('../log');
 const REQUEST_TIMEOUT = 2000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 60000;
 const DEFAULT_CONTROLLER = 'http://easy_proxies:9091';
+// CEB 的 405 是目标站按出口 IP 封禁，不是代理连不上；easy_proxies 的
+// blacklist_duration 只处理连接层失败，所以 405 冷却必须由 crawler 侧记住。
+// 实测 CEB 405 曾持续 >8h53m，这里用 12h 保守值，可用环境变量覆盖。
+const DEFAULT_NODE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 let refreshAt = 0;
 let refreshPromise = null;
 const authTokens = new Map();
+const nodeCooldownUntil = new Map();
 
 function normalizeSite(site) {
   return String(site || '').trim().toLowerCase();
@@ -103,13 +108,56 @@ async function request(base, method, endpoint, data, { timeout = REQUEST_TIMEOUT
   }
 }
 
-function normalizeNodes(rawNodes) {
+function nodeCooldownMs() {
+  const raw = process.env.EASY_PROXIES_NODE_COOLDOWN_MS;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_NODE_COOLDOWN_MS;
+  const value = Number(raw);
+  if (Number.isFinite(value) && value >= 0) return value;
+  log(`EASY_PROXIES_NODE_COOLDOWN_MS=${raw} 非法（需非负数毫秒），已回退 ${DEFAULT_NODE_COOLDOWN_MS}ms`, {
+    level: 'warn',
+    event: 'easy_proxies_node_cooldown_invalid',
+    context: { raw },
+    site: 'easy_proxies'
+  });
+  return DEFAULT_NODE_COOLDOWN_MS;
+}
+
+function nodeCooldownKey(site, tag) {
+  return `${normalizeSite(site)}|${String(tag || '')}`;
+}
+
+function isNodeCooling(site, tag, now = Date.now()) {
+  if (!tag) return false;
+  const until = nodeCooldownUntil.get(nodeCooldownKey(site, tag));
+  if (!until) return false;
+  if (until <= now) {
+    nodeCooldownUntil.delete(nodeCooldownKey(site, tag));
+    return false;
+  }
+  return true;
+}
+
+function markNodeCooling(site, tag) {
+  if (!tag) return 0;
+  const duration = nodeCooldownMs();
+  if (duration <= 0) return 0;
+  nodeCooldownUntil.set(nodeCooldownKey(site, tag), Date.now() + duration);
+  return duration;
+}
+
+function rawNodeTag(raw, index) {
+  const node = raw && typeof raw === 'object' ? raw : {};
+  const port = Number(node.port);
+  return String(node.tag || node.name || `node-${port || index + 1}`).trim();
+}
+
+function normalizeNodes(rawNodes, site) {
   if (!Array.isArray(rawNodes)) return [];
   const seen = new Set();
   return rawNodes.map((raw, index) => {
     const node = raw && typeof raw === 'object' ? raw : {};
     const port = Number(node.port);
-    const tag = String(node.tag || node.name || `node-${port || index + 1}`).trim();
+    const tag = rawNodeTag(raw, index);
     if (!tag || !Number.isInteger(port) || port <= 0) return null;
     if (node.blacklisted === true || node.available === false || node.initial_check_done === false) return null;
     if (seen.has(tag)) return null;
@@ -122,7 +170,7 @@ function normalizeNodes(rawNodes) {
       blacklisted: node.blacklisted,
       initial_check_done: node.initial_check_done
     };
-  }).filter(Boolean);
+  }).filter(Boolean).filter(node => !isNodeCooling(site, node.tag));
 }
 
 // 返回 { nodes, controller, source }：
@@ -131,9 +179,13 @@ function normalizeNodes(rawNodes) {
 // 区分两者是必要的：快照路径下「已切换节点」只说明端口号变了，
 // 并不证明该端口背后有可用出口——这次换点根本没有向管理面核对过。
 async function fetchNodes(siteConfig, proxyUrl, cached) {
+  const site = normalizeSite(siteConfig && siteConfig.name);
   if (cached && Array.isArray(cached.nodes) && cached.nodes.length) {
+    const rawNodes = cached.nodes;
     return {
-      nodes: normalizeNodes(cached.nodes),
+      nodes: normalizeNodes(rawNodes, site),
+      rawNodes,
+      rawCount: rawNodes.length,
       controller: cached.controller || '',
       source: 'snapshot'
     };
@@ -143,9 +195,9 @@ async function fetchNodes(siteConfig, proxyUrl, cached) {
   for (const base of controllerBases(siteConfig, proxyUrl)) {
     try {
       const response = await request(base, 'GET', '/api/nodes');
-      const nodes = response && response.data && response.data.nodes;
-      if (!Array.isArray(nodes)) throw new Error('easy_proxies /api/nodes 响应缺少 nodes 数组');
-      return { nodes: normalizeNodes(nodes), controller: base, source: 'api' };
+      const rawNodes = response && response.data && response.data.nodes;
+      if (!Array.isArray(rawNodes)) throw new Error('easy_proxies /api/nodes 响应缺少 nodes 数组');
+      return { nodes: normalizeNodes(rawNodes, site), rawNodes, rawCount: rawNodes.length, controller: base, source: 'api' };
     } catch (error) {
       failures.push(describeFailure(base, error));
     }
@@ -180,7 +232,7 @@ function nodeLabel(node) {
   return node ? (node.name || node.tag || `port:${node.port}`) : '';
 }
 
-async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], cached } = {}) {
+async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], cached, keepCurrentIfHealthy = false } = {}) {
   if (!proxyUrl) return { noop: true };
   const site = normalizeSite(siteConfig && siteConfig.name);
   let snapshot;
@@ -200,6 +252,33 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
   const nodes = snapshot.nodes;
   const source = snapshot.source || 'api';
   if (!nodes.length) {
+    const rawCount = Number(snapshot.rawCount) || 0;
+    const rawNodes = Array.isArray(snapshot.rawNodes) ? snapshot.rawNodes : [];
+    // normalizeNodes 也会过滤 blacklisted/available:false/未完成探测/重复节点。
+    // 只有「原始节点全部处于 405 冷却期」才是 allCooled；其余空池必须报不可用，
+    // 否则会把「节点全挂了」误判成「冷却期，等下一轮」。
+    const allCooled = rawNodes.length > 0 && rawNodes.every((raw, index) => {
+      const tag = rawNodeTag(raw, index);
+      return !!tag && isNodeCooling(site, tag);
+    });
+    if (allCooled) {
+      log(`easy_proxies 所有节点均在冷却期 [${site}] ${reason}（${rawCount} 个）`, {
+        level: 'warn',
+        event: 'proxy_pool_all_cooled',
+        context: { site, reason, source, rawCount },
+        site
+      });
+      return { exhausted: true, allCooled: true, source, from: '', tried: [], leaves: [], nodes: [], controller: snapshot.controller };
+    }
+    if (rawCount > 0) {
+      log(`easy_proxies 没有可用节点（均不可用/未完成探测/被拉黑或重复）[${site}] ${reason}（${rawCount} 个）`, {
+        level: 'warn',
+        event: 'proxy_pool_unavailable',
+        context: { site, reason, source, rawCount },
+        site
+      });
+      return { exhausted: true, allCooled: false, unavailable: true, source, from: '', tried: [], leaves: [], nodes: [], controller: snapshot.controller };
+    }
     log(`easy_proxies 没有可用多端口节点 [${site}] ${reason}`, {
       level: 'warn',
       event: 'proxy_pool_empty',
@@ -217,18 +296,41 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
     triedNames.push(current.tag);
     triedSet.add(current.tag);
   }
+  // 轮首只换「不可用」的当前出口：基础端口仍健康时保持不动，避免每轮开头无谓换点。
+  // 冷却节点已在 fetchNodes 被过滤掉，因此 current 不存在时自然走下面的换点逻辑。
+  if (keepCurrentIfHealthy && current) {
+    return { noop: true, keepCurrent: true, source, currentTag: current.tag, tried: triedNames, nodes, controller: snapshot.controller };
+  }
+  // 405 是目标站对当前出口的确定性拦截：把当前节点标记冷却，
+  // 后续 switchNode（包括下一轮 crawl）会跳过它，不再反复打已被封的 IP。
+  if (reason === 'dual405' && current) {
+    const cooldownMs = markNodeCooling(site, current.tag);
+    if (cooldownMs > 0) {
+      log(`easy_proxies 节点冷却 [${site}] ${reason}：${nodeLabel(current)}（${Math.round(cooldownMs / 60000)} 分钟）`, {
+        level: 'warn',
+        event: 'proxy_node_cooling',
+        context: { site, reason, node: nodeLabel(current), tag: current.tag, cooldownMs },
+        site
+      });
+    }
+  }
 
   const next = nodes.find(node => node.port !== currentPort && !triedSet.has(node.tag));
   const leaves = nodes.map(node => node.tag);
   if (!next) {
+    // nodes 在 fetch 时已过滤冷却节点，当前节点刚在上方被标记冷却。
+    // 若剩下的节点也都进入冷却期，明确报 allCooled，供上层立即暂停本轮，
+    // 而不是让下一轮/下一页继续拿已封出口去试。
+    const allCooled = nodes.length > 0 && nodes.every(node => isNodeCooling(site, node.tag));
     log(`easy_proxies 节点池本轮已轮尽 [${site}] ${reason}（节点 ${nodes.length} 个，本轮已试 ${triedNames.length}）`, {
       level: 'warn',
       event: 'proxy_pool_exhausted',
-      context: { site, reason, leaves: nodes.length, tried: triedNames.length, source },
+      context: { site, reason, leaves: nodes.length, tried: triedNames.length, source, allCooled },
       site
     });
     return {
       exhausted: true,
+      allCooled,
       source,
       from: nodeLabel(current) || (currentPort ? `port:${currentPort}` : ''),
       tried: triedNames,
@@ -449,5 +551,6 @@ module.exports = {
   fetchNodes,
   isEasyProxiesProxyUrl,
   proxyUrlForPort,
-  _resetRefreshCooldown: () => { refreshAt = 0; refreshPromise = null; authTokens.clear(); }
+  _resetRefreshCooldown: () => { refreshAt = 0; refreshPromise = null; authTokens.clear(); },
+  _resetNodeCooldown: () => { nodeCooldownUntil.clear(); }
 };

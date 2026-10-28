@@ -304,9 +304,9 @@ logs/ceb/crawler-YYYY-MM-DD.jsonl
 ```dotenv
 SITES=yfbzb,ceb
 TOTAL_PAGES=100
-TOTAL_PAGES_CEB=30
+TOTAL_PAGES_CEB=20
 INTERVAL_MS=5000
-INTERVAL_MS_CEB=8000
+INTERVAL_MS_CEB=10000
 MIN_DELAY_S=0
 MAX_DELAY_S=300
 CRON_EXPR=0 2 * * *
@@ -319,13 +319,15 @@ EASY_PROXIES_REFRESH_COOLDOWN=600
 EASY_PROXIES_REFRESH_TIMEOUT=60
 ```
 
-`ceb` 已内置单页串行和 2.5–5.5 秒请求延迟，不建议删除限速。需要分开调度时使用：
+`ceb` 已内置单页串行和 2.5–5.5 秒请求延迟，不建议删除限速。历史 Excel 观测到湖北 category 88 每日新增约 1-2 页，建议每天两次而不是每小时——每小时跑 100 页只会反复探测已被封的出口。需要分开调度时使用：
 
 ```dotenv
 CRON_EXPR=
 CRON_YFBZB=0 2 * * *
-CRON_CEB=0 3 * * *
+CRON_CEB=35 3,15 * * *
 ```
+
+CEB 的 HTTP 405 是目标站按出口 IP 封禁，`easy_proxies` 的 `blacklist_duration` 不覆盖它；crawler 侧会把 405 节点冷却并换点。若整池节点同 ASN/订阅段同时 405，降频只能减缓消耗，根治需要换成干净的独享住宅/4G 出口。
 
 只部署 yfbzb 时：
 

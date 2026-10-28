@@ -61,6 +61,7 @@
   - `package.json` 改为 `http-proxy-agent`/`https-proxy-agent`，文档全量脱敏（`xxx.xxx.xxx.xxx` 占位）。
 - **权衡**: 镜像回到轻量、无 `chromium` 体积/内存负担；换 IP 才是对 IP 段封禁的根治，代理仅 `ceb` 按需启用，不影响 `yfbzb` 直连。
 - **验证**: 代理解析/白名单/脱敏单测；`mockAxios` 双 405 快败 `calls=4` 与熔断；当时已有测试通过，最近一次完整回归（2026-09-08）为 9 个测试套件全部通过。
+- **后续修订**: 2026-10-28 ADR 0007 将 ceb 的 `fallbackOn405` 改为 `failFast405`；GET 405 不再降级 POST，而是直接冷却节点并换 IP。
 
 ## 修订 2026-08-28 — 迁移到 easy_proxies 多端口
 

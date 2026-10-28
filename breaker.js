@@ -11,8 +11,11 @@
 // record 的契约（调用方如实传整页结果，不得预先归一）：
 // - failed        页面是否失败
 // - status        HTTP 状态；undefined/null 表示没拿到应答（网络级失败）
-// - shieldType    拦截页类型：'acw'（WAF 挑战求解失败）/ 'safeline'（站点声明的拦截页）
-// - proxySwitched 该页双 405 后已换 IP
+// - shieldType    拦截页类型：'acw'（WAF 挑战求解失败）/ 'safeline'（站点声明的 403 拦截页）
+//                 / 'http468'（站点声明的 HTTP 468 风控拦截）
+// - proxySwitched 该页 405 换点后请求新出口观察窗（置位则清零连击）；
+//                 failFast405 的重试仍失败页不置位，否则连击会被无限清零
+// - proxySwitchCount 本页 405 换点次数；只累计日志计数，不重置连续 405
 // - endReached    站点边界页（403 等）
 // - emptyPage     HTTP 200 但零行
 // 返回本轮累计的 405 换点数，供「本轮已换 N 次」那行日志用。
@@ -76,6 +79,11 @@ function createBreaker(deps = {}) {
         proxy405Switches++;
       } else {
         consecutive405++;
+        // failFast405：本页换过点但新出口仍 405，不能清零连击；
+        // 换点次数单独累计，供熔断日志写「换了几次仍被拦」。
+        if (Number.isInteger(r.proxySwitchCount) && r.proxySwitchCount > 0) {
+          proxy405Switches += r.proxySwitchCount;
+        }
       }
     }
     // 无 status 的失败才是网络级（ECONNRESET/超时/TLS 断开）；
