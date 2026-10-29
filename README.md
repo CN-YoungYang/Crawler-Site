@@ -76,6 +76,7 @@ node index.js
 | `EASY_PROXIES_REFRESH_COOLDOWN` | 600 秒 | 订阅刷新成功后的限频窗口。刷新失败不写冷却；**超时例外**——POST 已送达、服务端多半仍在执行，超时同样写冷却，避免每轮重复阻塞 |
 | `EASY_PROXIES_REFRESH_TIMEOUT` | 60 秒 | `POST /api/subscription/refresh` 的独立超时。该接口会同步等待订阅拉取 + 健康检查，不能沿用 `/api/nodes` 的 2 秒 |
 | `EASY_PROXIES_NODE_COOLDOWN_MS` | 43200000（12 小时） | HTTP 405 命中节点按 `站点|tag` 冷却的时长（毫秒）。CEB 实测封禁曾持续 >8h53m，可调到 `86400000`（24 小时）；全部节点冷却时本轮暂停 |
+| `EASY_PROXIES_SETTLE_TIMEOUT` | 20 秒 | 刷新返回后等节点池探测收敛的最长时间。easy_proxies 的 `min_available_nodes` 只等到「至少 N 个节点通过」，其余仍在探测；立刻读 `/api/nodes` 会拿到半池（2026-10-28 08:37 只看到 5/58）。设 `0` 关闭等待 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 空 | 通用代理与直连白名单；站点专用 `CEB_PROXY_URL` / `PROXY_CEB` 优先级更高 |
 
 ```bash
@@ -169,12 +170,12 @@ server {
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `isBoundary`/`blockType`（SafeLine 403 / HTTP 468）与 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
    - **批次并发**：每批按站点 `batchSize`（默认 10）页并发抓取（`Promise.all`），批次间等待 `interval` 毫秒；`ceb` 为风控串行（`batchSize:1` + `requestDelay 2500-5500ms` + 代理换 IP）。
-   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`GET 405` 在 `failFast405:true` 的站点（`ceb`）直接冷却当前节点并换 IP（不再发 POST），其它站点可在 `fallbackOn405:true` 时先降级 `POST`（不消耗 `retries`，有终局兜底）；单发 405（`failFast405`）或 GET→POST 双 405 换点未果时连续 405 熔断（≥2 页 405 即停），非首页每页只重试一次（第二次 405 只冷却节点、不重试），避免逐页烧节点却不熔断；第一页遇到 405 或网络失败会按序换用未试过的健康端口，每次换点重置该页重试额度，尝试节点数受 `firstPageProbeLimit` 限制（`ceb` 为 3），达到上限、节点池轮尽或全部节点冷却时返回 `gateAbort` 并暂停本轮抓取；非首页换点发现全部节点冷却时也立即暂停本轮并保留断点；轮首若基础端口节点仍在冷却期，会先切到健康节点再发第一条请求。主动轮换遇到全冷却同样暂停本轮。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。订阅刷新后额外读 `GET /api/subscription/status`，把实际 `node_count`/`refresh_count`/`last_error` 记入日志；节点数为 0 **或** `last_error` 非空（订阅拉取失败但仍回退旧缓存，`node_count` 不为 0）时降级为 `warn`，状态接口不可达不影响刷新判定。
+   - **逐页抓取**：`crawlPage()` 全站 `axios`（每站 `timeout`/`headers`/`method` 可覆写），`ceb` 默认经 `CEB_PROXY_URL` 使用 easy_proxies 多端口代理换 IP（`http-proxy-agent`/`https-proxy-agent`，`NO_PROXY` 白名单；管理 API `9091`，订阅刷新 `POST /api/subscription/refresh`）。网络/超时最多重试 3 次，退避指数 + 全量抖动（`base=2s`、封顶 60s）；`GET 405` 在 `failFast405:true` 的站点（`ceb`）直接冷却当前节点并换 IP（不再发 POST），其它站点可在 `fallbackOn405:true` 时先降级 `POST`（不消耗 `retries`，有终局兜底）；单发 405（`failFast405`）或 GET→POST 双 405 换点未果时连续 405 熔断（≥2 页 405 即停），非首页每页只重试一次（第二次 405 只冷却节点、不重试），避免逐页烧节点却不熔断；第一页遇到 405 或网络失败会按序换用未试过的健康端口，每次换点重置该页重试额度：`ceb` 不设节点次数上限（`firstPageProbeLimit: 0`，试到成功、池尽或全冷却为止），只用 `firstPageProbeTimeoutMs`（5 分钟）兜底；其它站点仍可用 `firstPageProbeLimit` 限次。达到次数上限、时间上限、节点池轮尽或全部节点冷却时返回 `gateAbort` 并暂停本轮抓取；非首页换点发现全部节点冷却时也立即暂停本轮并保留断点；轮首若基础端口节点仍在冷却期，会先切到健康节点再发第一条请求。主动轮换遇到全冷却同样暂停本轮。easy_proxies 空池/管理面不可达时安全降级；HTTP 200 盾页由站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 后重放一次，求解失败记为失败页并连续 2 页熔断（避免未解盾重试把出口 IP 打成 405）；`isBoundary` 判定边界（默认 403，`ceb` 的 429 重试而非边界）。轮前先读一次 `/api/nodes`：可用节点 ≥ 3 个就跳过整池刷新（easy_proxies 自己每 30 分钟刷），不足才刷新；刷新后按 `/api/nodes` 采样等节点池收敛（`EASY_PROXIES_SETTLE_TIMEOUT`，默认 20 秒）再换点；池子全部在冷却期时连刷新都不做、直接暂停本轮（刷新清不掉 crawler 侧冷却表）。订阅刷新后额外读 `GET /api/subscription/status`，把实际 `node_count`/`refresh_count`/`last_error` 记入日志；节点数为 0 **或** `last_error` 非空（订阅拉取失败但仍回退旧缓存，`node_count` 不为 0）时降级为 `warn`，状态接口不可达不影响刷新判定。
    - **终止条件**（四者满足其一即停）：
      - 某批全部页无新数据 **且** 失败页数 ≤ `failureThreshold`（站点 `failureThreshold` 或 `FAILURE_STOP_THRESHOLD`=2）
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
      - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
-     - 第 1 页探针因节点上限（`firstPageProbeLimit`）、节点池轮尽或全部节点冷却返回 `gateAbort`，本轮以 `first_page_probe_limited` / `first_page_gate_abort` / `first_page_all_cooled` 结束；非首页换点遇到全冷却以 `all_nodes_cooled` 暂停
+     - 第 1 页探针因节点次数上限（`firstPageProbeLimit`）、时间上限（`firstPageProbeTimeoutMs`）、节点池轮尽或全部节点冷却返回 `gateAbort`，本轮以 `first_page_probe_limited` / `first_page_probe_timeout` / `first_page_gate_abort` / `first_page_all_cooled` 结束；非首页换点遇到全冷却以 `all_nodes_cooled` 暂停
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
    - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds` + 可选 `realTotalPages`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。断点只前移不越过失败页——熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败与第一页探针轮尽都保留全部批次中最早的失败页，避免失败页被跳过后再也不重爬。
@@ -250,6 +251,9 @@ crawler/
 │   ├── dual405.test.js      # 双 405 当前页重试、第一页 gateAbort
 │   ├── proxySchedule.test.js # 主动按页轮换（rotateEveryPages）
 │   ├── firstPageProbeLimit.test.js # 首页探针限次
+│   ├── firstPageProbeTimeout.test.js # 首页探针时间上限（不限次数时兜底）
+│   ├── poolPrepare.test.js  # 轮前池子准备：够用跳过刷新、不足才刷、全冷却直接暂停
+│   ├── poolSettle.test.js   # 刷新后等节点池探测收敛再换点
 │   ├── nodeCooldown.test.js # 405 节点冷却（跨轮跳过）
 │   └── failFast405.test.js  # ceb 单发 405 快败：换点/探针限次/防连击清零
 ├── Dockerfile            # node:20-alpine + tzdata/ca-certificates + TZ=Asia/Shanghai + EXPOSE 8080（轻量无 chromium）

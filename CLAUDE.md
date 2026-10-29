@@ -44,9 +44,9 @@ docker compose down
 
 ## 站点策略
 
-站点配置位于 `sites/<site>.js`，可提供 `buildUrl`、`parse`、`extractId`、`isBoundary`、`blockType`、`parseTotalPages`、`linkPrefix`、`batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`challenge`、`rotateEveryPages` 和 `firstPageProbeLimit`。默认策略 `defaultBuildUrl`、`defaultParse`、`defaultExtractId`、`defaultIsBoundary` 内联在 `crawler.js`。注册表 `sites/index.js` 当前只包含 `yfbzb` 和 `ceb`。
+站点配置位于 `sites/<site>.js`，可提供 `buildUrl`、`parse`、`extractId`、`isBoundary`、`blockType`、`parseTotalPages`、`linkPrefix`、`batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`challenge`、`rotateEveryPages`、`firstPageProbeLimit` 和 `firstPageProbeTimeoutMs`。默认策略 `defaultBuildUrl`、`defaultParse`、`defaultExtractId`、`defaultIsBoundary` 内联在 `crawler.js`。注册表 `sites/index.js` 当前只包含 `yfbzb` 和 `ceb`。
 
-`yfbzb` 直接使用 `axios`。`ceb` 使用 `axios` 加 `http-proxy-agent`/`https-proxy-agent`，代理优先级为 `PROXY_<SITE>`、`CEB_PROXY_URL`、`PROXY_URL`、`HTTP_PROXY`，并遵守 `NO_PROXY` 白名单。easy_proxies 代理提供方通过 `/api/nodes` 发现健康节点，通过端口轮换换 IP；站点可用 `rotateEveryPages` 主动按页轮换、`firstPageProbeLimit` 限制首页探针节点数；HTTP 405 命中的节点（`ceb` 单发即命中，见 `failFast405`）进入 12 小时冷却（`EASY_PROXIES_NODE_COOLDOWN_MS` 可覆盖），全部冷却时暂停本轮；`POST /api/subscription/refresh` 受冷却时间限制，失败时安全降级。
+`yfbzb` 直接使用 `axios`。`ceb` 使用 `axios` 加 `http-proxy-agent`/`https-proxy-agent`，代理优先级为 `PROXY_<SITE>`、`CEB_PROXY_URL`、`PROXY_URL`、`HTTP_PROXY`，并遵守 `NO_PROXY` 白名单。easy_proxies 代理提供方通过 `/api/nodes` 发现健康节点，通过端口轮换换 IP；站点可用 `rotateEveryPages` 主动按页轮换；`ceb` 首页探针不限次数（`firstPageProbeLimit: 0`），用 `firstPageProbeTimeoutMs`（5 分钟）兜底，其它站点仍可用 `firstPageProbeLimit` 限次；轮前只在池子可用 < 3 个时刷新，刷新后等节点池收敛；HTTP 405 命中的节点（`ceb` 单发即命中，见 `failFast405`）进入 12 小时冷却（`EASY_PROXIES_NODE_COOLDOWN_MS` 可覆盖），全部冷却时暂停本轮；`POST /api/subscription/refresh` 受冷却时间限制，失败时安全降级。
 
 ## 关键行为约定
 

@@ -5,6 +5,11 @@ const { log } = require('../log');
 
 const REQUEST_TIMEOUT = 2000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 60000;
+// 刷新后等节点池探测收敛：POST 只等到 min_available_nodes 个节点通过就返回，
+// 其余节点还在逐个探测（initial_check_done=false），此刻读 /api/nodes 会得到半个池子。
+const DEFAULT_SETTLE_TIMEOUT_MS = 20000;
+const SETTLE_POLL_MS = 700;
+const SETTLE_QUIET_POLLS = 3;
 const DEFAULT_CONTROLLER = 'http://easy_proxies:9091';
 // CEB 的 405 是目标站按出口 IP 封禁，不是代理连不上；easy_proxies 的
 // blacklist_duration 只处理连接层失败，所以 405 冷却必须由 crawler 侧记住。
@@ -210,6 +215,83 @@ async function fetchNodes(siteConfig, proxyUrl, cached) {
   throw error;
 }
 
+// 刷新后节点池的收敛等待。
+//
+// 事故（2026-10-28 08:37 生产日志）：crawl_start 刷新在 08:37:53.894 返回，
+// 08:37:54.320 轮首换点就查了 /api/nodes——0.43 秒，58 个订阅节点里只有 5 个
+// initial_check_done=true，其余全被 normalizeNodes 当「未完成探测」过滤掉。
+// 第一页探针从这 5 个里连试 3 个都是 405，整轮 0 条；同一订阅在 2026-10-28 白天的
+// 可用节点数是 21（ADR 0006），5 个是明显的异常值。
+// 成因：刷新返回不等于全部节点探测完成——min_available_nodes 是「至少 N 个通过就继续」，
+// 其余节点还在逐个探测。POST 返回到池子真正可用之间有一段空窗，crawler 不能拿
+// 这段空窗里的半池去换点。真表现为「节点本来就少」时，这段等待只会记 5 → 5，不掩盖事实。
+//
+// 语义：按 SETTLE_POLL_MS 采样，连续 SETTLE_QUIET_POLLS 次没有新增（或达到订阅自报的
+// 节点数、或超时）即认为收敛。池子本来就稳定时只多花一两秒；管理面中途不可达立即放弃，
+// 不把刷新本身拖成失败。
+function settleTimeoutMs() {
+  const raw = process.env.EASY_PROXIES_SETTLE_TIMEOUT;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_SETTLE_TIMEOUT_MS;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    log(`EASY_PROXIES_SETTLE_TIMEOUT=${raw} 非法（需非负数秒），已回退 ${DEFAULT_SETTLE_TIMEOUT_MS / 1000}s`, {
+      level: 'warn',
+      event: 'easy_proxies_settle_timeout_invalid',
+      context: { raw },
+      site: 'easy_proxies'
+    });
+    return DEFAULT_SETTLE_TIMEOUT_MS;
+  }
+  return seconds * 1000;
+}
+
+async function waitPoolSettled(siteConfig, proxyUrl, expected) {
+  const timeoutMs = settleTimeoutMs();
+  if (timeoutMs <= 0) return null;
+  const startedAt = Date.now();
+  let before = null;
+  let last = -1;
+  let quiet = 0;
+  let polls = 0;
+  let aborted = false;
+  while (Date.now() - startedAt < timeoutMs) {
+    let nodes;
+    try {
+      // 每次都重新查管理面：fetchNodes 的 cached 是「本轮早先快照」，这里要的是实时池子
+      nodes = (await fetchNodes(siteConfig, proxyUrl, null)).nodes;
+    } catch (_) {
+      aborted = true;
+      break;
+    }
+    const count = nodes.length;
+    if (before === null) before = count;
+    if (count === last) quiet++;
+    else quiet = 0;
+    last = count;
+    polls++;
+    if (Number(expected) > 0 && count >= Number(expected)) break;
+    if (quiet >= SETTLE_QUIET_POLLS) break;
+    await new Promise(resolve => setTimeout(resolve, SETTLE_POLL_MS));
+  }
+  if (before === null) return null;
+  return { before, after: last, polls, elapsedMs: Date.now() - startedAt, aborted };
+}
+
+// 轮前池子状态（ADR 0008）：只回答「够不够用」，不换点、不冷却。
+// usable    —— 过滤后可用（未冷却/可用/探测完成/未拉黑）节点数；
+// rawCount  —— 管理 API 返回的原始节点数；
+// allCooled —— 原始节点全部处于 405 冷却期（区别于「全都不可用」，后者不该暂停本轮）。
+async function poolStatus(siteConfig, proxyUrl) {
+  const site = normalizeSite(siteConfig && siteConfig.name);
+  const snapshot = await fetchNodes(siteConfig, proxyUrl, null);
+  const rawNodes = Array.isArray(snapshot.rawNodes) ? snapshot.rawNodes : [];
+  const allCooled = rawNodes.length > 0 && rawNodes.every((raw, index) => {
+    const tag = rawNodeTag(raw, index);
+    return !!tag && isNodeCooling(site, tag);
+  });
+  return { usable: snapshot.nodes.length, rawCount: rawNodes.length, allCooled, source: snapshot.source };
+}
+
 function portFromProxyUrl(proxyUrl) {
   try {
     const port = Number(new URL(proxyUrl).port);
@@ -232,7 +314,7 @@ function nodeLabel(node) {
   return node ? (node.name || node.tag || `port:${node.port}`) : '';
 }
 
-async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], cached, keepCurrentIfHealthy = false } = {}) {
+async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], cached, keepCurrentIfHealthy = false, coolOnly = false } = {}) {
   if (!proxyUrl) return { noop: true };
   const site = normalizeSite(siteConfig && siteConfig.name);
   let snapshot;
@@ -313,6 +395,12 @@ async function switchNode(siteConfig, { reason = '', proxyUrl = '', tried = [], 
         site
       });
     }
+  }
+
+  // 预算用尽（探针限次/超时）：只冷却当前节点，不再选新出口。
+  // 选出来的端口没人会发请求，日志却会写「已切换节点」，读者会误以为试过第 N+1 个。
+  if (coolOnly) {
+    return { noop: true, cooledOnly: true, source, from: nodeLabel(current) || (currentPort ? `port:${currentPort}` : ''), tried: triedNames, nodes, controller: snapshot.controller };
   }
 
   const next = nodes.find(node => node.port !== currentPort && !triedSet.has(node.tag));
@@ -512,6 +600,18 @@ async function refreshProviders({ site = '', reason = '', siteConfig, proxyUrl }
           context: { site, reason, endpoint: `${base}/api/subscription/refresh`, nodeCount, refreshCount, lastError: subError },
           site
         });
+        // 刷新返回时节点池可能仍在逐个探测（min_available_nodes 只管「至少 N 个通过」）。
+        // 先等池子收敛，crawl() 的轮首换点才会看到完整节点集，而不是重建中的半池。
+        if (nodeCount > 0) {
+          const settled = await waitPoolSettled(siteConfig, proxyUrl, nodeCount);
+          if (settled) {
+            log(`easy_proxies 节点池收敛 [${site}] ${reason}：可用 ${settled.before} → ${settled.after}（${settled.elapsedMs}ms / ${settled.polls} 次采样${settled.aborted ? '，采样中途管理面不可达' : ''}）`, {
+              event: 'proxy_pool_settled',
+              context: { site, reason, nodeCount, before: settled.before, after: settled.after, polls: settled.polls, elapsedMs: settled.elapsedMs, aborted: settled.aborted },
+              site
+            });
+          }
+        }
         return true;
       } catch (error) {
         failures.push(describeFailure(base, error));
@@ -549,8 +649,10 @@ module.exports = {
   switchNode,
   refreshProviders,
   fetchNodes,
+  poolStatus,
   isEasyProxiesProxyUrl,
   proxyUrlForPort,
   _resetRefreshCooldown: () => { refreshAt = 0; refreshPromise = null; authTokens.clear(); },
-  _resetNodeCooldown: () => { nodeCooldownUntil.clear(); }
+  _resetNodeCooldown: () => { nodeCooldownUntil.clear(); },
+  _markNodeCooling: (site, tag) => markNodeCooling(site, tag)
 };

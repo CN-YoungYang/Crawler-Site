@@ -143,7 +143,9 @@ function createRotation(site, siteConfig, deps = {}) {
         proxyUrl,
         tried: [...tried],
         cached: leafSnapshot,
-        keepCurrentIfHealthy: !!options.keepCurrentIfHealthy
+        keepCurrentIfHealthy: !!options.keepCurrentIfHealthy,
+        // coolOnly：探针预算用尽时只冷却当前节点，不再选新出口（ADR 0008）。
+        coolOnly: !!options.coolOnly
       });
     } catch (e) {
       logFn(`代理切换异常 [${key}] ${reason}：${e.message}`, { level: 'warn', event: 'proxy_switch_failed', context: { site: key, reason, error: e.message }, site: key });

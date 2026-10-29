@@ -43,14 +43,14 @@
 - 断点文件为 `state-<site>.json`，按站点隔离；正常完成后删除，优雅中断或写盘失败时保留以便续跑。
 - `backoffDelay()` 使用指数退避和全量随机抖动，基数 2 秒、上限 60 秒，并保持为纯函数。
 - `failFast405` 单发快败（`ceb`，不做 GET→POST）、未启用站点的 `GET 405 → POST` 降级、双 405 快败、节点端口轮换、第一页 `gateAbort`、网络失败换 IP 和熔断必须保持对 `axios` 全链路有效。
-- 每站点可以覆盖 `batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`rotateEveryPages` 和 `firstPageProbeLimit`；没有覆盖时使用 `BATCH_SIZE`、`FAILURE_STOP_THRESHOLD`、`REQUEST_TIMEOUT` 和 `USER_AGENT` 默认值。
+- 每站点可以覆盖 `batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`rotateEveryPages`、`firstPageProbeLimit` 和 `firstPageProbeTimeoutMs`；没有覆盖时使用 `BATCH_SIZE`、`FAILURE_STOP_THRESHOLD`、`REQUEST_TIMEOUT` 和 `USER_AGENT` 默认值。
 
 ## 测试约定
 
 - 测试使用 Node 内置断言，不引入测试框架。
 - 需要重新加载带有新 `axios` 模拟的爬虫模块时，使用 `test/helper.js` 中的 `freshCrawler()`。
 - 写入 Excel、日志或断点的测试使用 `withTempCwd()`，确保 `file/<site>/`、`logs/<site>/` 和 `state-<site>.json` 不污染真实工作区。
-- 根据行为覆盖解析、去重、403 边界、SafeLine 拦截页与 HTTP 468 风控、重试退避、文件合并、抓取终止、真实总页数上限、easy_proxies 节点认证与轮换、代理主动轮换/节点冷却/首页探针限次。
+- 根据行为覆盖解析、去重、403 边界、SafeLine 拦截页与 HTTP 468 风控、重试退避、文件合并、抓取终止、真实总页数上限、easy_proxies 节点认证与轮换、代理主动轮换/节点冷却/首页探针限次与超时/轮前池子准备。
 - 修改前后运行 `node test/run.js` 或 `npm test`。
 - 多站点测试应验证 `file/<site>/`、`logs/<site>/` 和 `state-<site>.json` 互相隔离。`SITES` 中未注册的站点在多站点模式下警告并跳过，单站点模式下快速失败。
 - 模拟代理提供方请求时，必须先安装 `axios` 模拟，再加载 `crawler.js` 或 `sites/_easy_proxies.js`。

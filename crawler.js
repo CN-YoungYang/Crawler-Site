@@ -173,8 +173,12 @@ async function trySwitchProxy(siteConfig, reason) {
   return rotation.switch(reason);
 }
 
-// 启动/每轮爬取前刷新代理订阅（easy_proxies 读取订阅并生成多端口节点）。
-// 供 index.js 程序启动时调用；crawl() 每轮也会先刷新一次（代理提供方内部限频）。
+// 轮前池子可用数低于这个值才值得整池刷新；高于它说明池子本来就能干活，
+// 刷新只会重建隧道、把节点打回「探测中」（ADR 0008）。
+const MIN_USABLE_POOL = 3;
+
+// 启动时刷新代理订阅（easy_proxies 读取订阅并生成多端口节点）。
+// 供 index.js 程序启动时调用。
 async function refreshProxyProviders(site) {
   let siteConfig;
   try { siteConfig = getSiteConfig(site); } catch (_) { return false; }
@@ -184,6 +188,45 @@ async function refreshProxyProviders(site) {
   try {
     return await provider.refreshProviders({ site: normalizeSite(site), reason: 'startup', siteConfig, proxyUrl });
   } catch (_) { return false; }
+}
+
+// 站点是否真的配了可刷新的代理提供方（不是「解析到 HTTP_PROXY」就算）：
+// index.js 的启动刷新计数要用它做分母，否则没有代理的站点会把比例算成 1/2。
+function hasProxyProvider(site) {
+  try {
+    const siteConfig = getSiteConfig(site);
+    const proxyUrl = resolveProxyUrl(siteConfig);
+    return !!proxyUrl && !!getProxyProvider(siteConfig, proxyUrl);
+  } catch (_) { return false; }
+}
+
+// 轮前准备代理池（ADR 0008）：先读一次 /api/nodes 判断池子状态，再决定要不要整池刷新。
+//   - 全部节点在冷却期 → 原样返回，让 crawl() 直接暂停（刷新清不掉冷却表）；
+//   - 可用 >= MIN_USABLE_POOL → 跳过刷新，省掉一次隧道重建与 20 秒收敛等待；
+//   - 可用不足或管理面查不到 → 刷新（失败不阻塞本轮，沿用现有出口）。
+async function prepareProxyPool(siteConfig, site) {
+  const proxyUrl = resolveProxyUrl(siteConfig);
+  const provider = getProxyProvider(siteConfig, proxyUrl);
+  if (!proxyUrl || !provider) return null;
+  let status = null;
+  try {
+    if (typeof provider.poolStatus === 'function') status = await provider.poolStatus(siteConfig, proxyUrl);
+  } catch (_) { status = null; }
+  if (status && status.allCooled) {
+    log(`节点池全部在冷却期（${status.rawCount} 个），跳过轮前刷新 [${site}]`, { level: 'warn', event: 'proxy_pool_all_cooled_at_start', context: { site, rawCount: status.rawCount }, site });
+    return status;
+  }
+  if (status && status.usable >= MIN_USABLE_POOL) {
+    log(`节点池可用 ${status.usable} 个（>= ${MIN_USABLE_POOL}），跳过轮前刷新 [${site}]`, { event: 'proxy_pool_ready', context: { site, usable: status.usable, rawCount: status.rawCount }, site });
+    return status;
+  }
+  if (typeof provider.refreshProviders === 'function') {
+    await provider.refreshProviders({ site, reason: 'crawl_start', siteConfig, proxyUrl });
+    try {
+      if (typeof provider.poolStatus === 'function') status = await provider.poolStatus(siteConfig, proxyUrl);
+    } catch (_) {}
+  }
+  return status;
 }
 
 // shanghaiDateStr 已收敛至 utils.js（Intl 标准库）
@@ -295,12 +338,18 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   }
   const siteName = siteConfig.name || normalizeSite(siteConfig.name);
   // 第一页探针：pageNo===1 时若当前出口失败则一路换点，直到成功或节点池轮尽（见下方失败处理）。
-  // firstPageProbeLimit：站点可限制第一页最多尝试多少个节点，避免一次把整池出口打一遍。
+  // firstPageProbeLimit：站点可限制第一页最多尝试多少个节点；0 = 不设次数上限（ceb，ADR 0008）。
   const isFirstPage = pageNo === 1;
   const firstPageProbeLimit = isFirstPage && Number(siteConfig.firstPageProbeLimit) > 0
     ? Math.max(1, Math.floor(Number(siteConfig.firstPageProbeLimit)))
     : 0;
   let firstPageNodesTried = isFirstPage ? 1 : 0;
+  // firstPageProbeTimeoutMs：首页探针的时间上限（ADR 0008）。ceb 不限节点数，
+  // 用时间兜底：池子异常大或管理面变慢时，整轮不会卡在首页十几分钟。
+  const firstPageProbeTimeoutMs = isFirstPage && Number(siteConfig.firstPageProbeTimeoutMs) > 0
+    ? Math.max(1000, Math.floor(Number(siteConfig.firstPageProbeTimeoutMs)))
+    : 0;
+  const firstPageProbeStartedAt = Date.now();
   const isBoundary = siteConfig.isBoundary || defaultIsBoundary;
   const linkPrefix = siteConfig.linkPrefix || '';
   const timeout = siteConfig.timeout ?? REQUEST_TIMEOUT;
@@ -333,7 +382,12 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
   }
 
+  function firstPageProbeTimedOut() {
+    return firstPageProbeTimeoutMs > 0 && Date.now() - firstPageProbeStartedAt >= firstPageProbeTimeoutMs;
+  }
+
   function canTryAnotherFirstPageNode() {
+    if (firstPageProbeTimedOut()) return false;
     return !firstPageProbeLimit || firstPageNodesTried < firstPageProbeLimit;
   }
 
@@ -344,6 +398,17 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
   function firstPageProbeLimitResult(status) {
     log(`第 1 页探针达到上限（已试 ${firstPageNodesTried} 个节点，上限 ${firstPageProbeLimit}），暂停本轮以保护剩余出口 [${siteName}]`, { level: 'warn', event: 'first_page_probe_limited', context: { page: pageNo, status, triedNodes: firstPageNodesTried, limit: firstPageProbeLimit, site: siteName }, site: siteName });
     return { pageData: [], failed: true, status, probeLimitReached: true, gateAbort: true };
+  }
+
+  function firstPageProbeTimeoutResult(status) {
+    log(`第 1 页探针超过时间上限（${Math.round(firstPageProbeTimeoutMs / 1000)}s，已试 ${firstPageNodesTried} 个节点），暂停本轮 [${siteName}]`, { level: 'warn', event: 'first_page_probe_timeout', context: { page: pageNo, status, triedNodes: firstPageNodesTried, timeoutMs: firstPageProbeTimeoutMs, site: siteName }, site: siteName });
+    return { pageData: [], failed: true, status, probeTimeoutReached: true, gateAbort: true };
+  }
+
+  // 预算用尽有两种原因（次数上限 / 时间上限），日志与结果字段必须能区分，
+  // 否则池子大时会写成「达到上限（已试 N 个节点，上限 0）」这种读不通的话。
+  function firstPageBudgetResult(status) {
+    return firstPageProbeTimedOut() ? firstPageProbeTimeoutResult(status) : firstPageProbeLimitResult(status);
   }
 
   function firstPageAllCooledResult(status) {
@@ -366,15 +431,20 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       // 换点次数单独回报，供熔断日志写「换了几次仍被拦」，但不得重置连续 405。
       return { result: { pageData: [], failed: true, status, proxySwitched: false, proxySwitchCount: 1 + (sw.ok ? 1 : 0), proxyExhausted: !!sw.exhausted, allCooled: !!sw.allCooled } };
     }
+    // 预算已用尽时仍要冷却当前节点（它确实被 405 拦了），但不能再选一个新出口：
+    // 否则日志会先写「已切换节点 X → Y」，下一毫秒又写「探针达到上限」，
+    // 读者会以为第 N+1 个节点被试过——实际只有端口被切过去，请求一发没发。
+    const budgetLeft = !isFirstPage || canTryAnotherFirstPageNode();
     let sw = makeSwitchResult();
-    try { sw = await switchProxy('dual405'); } catch (_) {}
+    try { sw = await switchProxy('dual405', { coolOnly: !budgetLeft }); } catch (_) {}
+    if (isFirstPage && !budgetLeft) return { result: firstPageBudgetResult(status) };
     if (isFirstPage && (sw.ok || sw.exhausted)) {
       if (sw.exhausted) {
         if (sw.allCooled) return { result: firstPageAllCooledResult(status) };
         log(`第 1 页在所有节点上均被拦（405），判定出口全被拦截，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, status, site: siteName }, site: siteName });
         return { result: { pageData: [], failed: true, status, proxyExhausted: true, gateAbort: true } };
       }
-      if (!canTryAnotherFirstPageNode()) return { result: firstPageProbeLimitResult(status) };
+      if (!canTryAnotherFirstPageNode()) return { result: firstPageBudgetResult(status) };
       noteFirstPageNodeTried();
       log(`第 1 页 405 已换 IP（${sw.from} → ${sw.to}）${staleNote(sw.stale)}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw.from, to: sw.to, site: siteName, stale: !!sw.stale }, site: siteName });
       await new Promise(r => setTimeout(r, backoffDelay(0)));
@@ -555,8 +625,12 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
       if (retries >= maxRetries) {
         // 换点重置：网络失败（无 status）达上限后，尝试换 IP 重试
         if (errStatus === undefined || errStatus === null) {
+          // 网络失败也要先看预算：用尽时只换点做「冷却/记账」没有意义（网络失败不冷却节点），
+          // 直接按预算结果收尾，不再选一个用不上的新出口。
+          const netBudgetLeft = !isFirstPage || canTryAnotherFirstPageNode();
           let sw2 = makeSwitchResult();
-          try { sw2 = await switchProxy(isFirstPage ? 'first_page_net_fail' : 'net_fail'); } catch (_) {}
+          try { sw2 = await switchProxy(isFirstPage ? 'first_page_net_fail' : 'net_fail', { coolOnly: !netBudgetLeft }); } catch (_) {}
+          if (isFirstPage && !netBudgetLeft) return firstPageBudgetResult(errStatus);
           // 第一页探针：当前出口网络不通就一直换，直到成功或节点池轮尽（轮尽=后续页同样不通，取消本次抓取）
           if (isFirstPage && (sw2.ok || sw2.exhausted)) {
             if (sw2.exhausted) {
@@ -564,7 +638,7 @@ async function crawlPage(pageNo, siteOrBaseUrl, urlSuffixOrExistingIds, existing
               log(`第 1 页在所有节点上均网络失败，判定出口全部不可用，取消本次抓取 [${siteName}]`, { level: 'error', event: 'first_page_gate_exhausted', context: { page: pageNo, site: siteName }, site: siteName });
               return { pageData: [], failed: true, gateAbort: true };
             }
-            if (!canTryAnotherFirstPageNode()) return firstPageProbeLimitResult(errStatus);
+            if (!canTryAnotherFirstPageNode()) return firstPageBudgetResult(errStatus);
             noteFirstPageNodeTried();
             log(`第 1 页网络失败已换 IP（${sw2.from} → ${sw2.to}）${staleNote(sw2.stale)}，继续探针重试`, { level: 'warn', event: 'page_retry_after_switch', context: { page: pageNo, from: sw2.from, to: sw2.to, site: siteName, stale: !!sw2.stale }, site: siteName });
             retries = 0;
@@ -755,14 +829,12 @@ async function crawl(a, b, c, d) {
       }
     }
   } catch (_) {}
-  // 每轮爬取前先刷新代理订阅：先刷新保证本轮换点（尤其第一页探针）拿到最新节点；
-  // 代理提供方内部限频，失败不阻塞本轮。
+  // 轮前代理池准备（ADR 0008）：池子够用就跳过整池刷新，只有不足时才刷。
+  // easy_proxies 自己每 30 分钟刷一次；轮前再刷一次只会重建隧道、把池子打回「探测中」，
+  // 2026-10-28 08:37 的「58 个节点只看到 5 个可用」就是这么来的。
+  let poolStatus = null;
   try {
-    const _refreshUrl = resolveProxyUrl(siteConfig);
-    const _provider = getProxyProvider(siteConfig, _refreshUrl);
-    if (_refreshUrl && _provider && typeof _provider.refreshProviders === 'function') {
-      await _provider.refreshProviders({ site, reason: 'crawl_start', siteConfig, proxyUrl: _refreshUrl });
-    }
+    poolStatus = await prepareProxyPool(siteConfig, site);
   } catch (_) {}
 
   const checkpoint = loadCheckpoint(site);
@@ -803,6 +875,7 @@ async function crawl(a, b, c, d) {
   // 第一页探针轮尽/限次/全冷却：判定出口不可用，取消本次抓取
   let gateAborted = false;
   let probeLimited = false;
+  let probeTimedOut = false;
   let allNodesCooled = false;
   let retryFromPage = null;
   // 断点唯一的不变量：只前移，不越过失败页。
@@ -812,6 +885,15 @@ async function crawl(a, b, c, d) {
   function noteRetryPage(page) {
     if (!Number.isInteger(page) || page < 1) return;
     retryFromPage = retryFromPage === null ? page : Math.min(retryFromPage, page);
+  }
+  // 轮首池子已全部冷却：刷新清不掉 crawler 侧的冷却表，直接暂停本轮——
+  // 不刷新、不换点、不发第一发请求。ADR 0008 的「全冷却不白刷」。
+  if (poolStatus && poolStatus.allCooled) {
+    allNodesCooled = true;
+    gateAborted = true;
+    shouldStopCrawling = true;
+    noteRetryPage(currentPage);
+    log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: currentPage, rawCount: poolStatus.rawCount }, site });
   }
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
   // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置。
@@ -826,18 +908,21 @@ async function crawl(a, b, c, d) {
   // 轮首出口选择：405 冷却表跨轮保留，基础端口若正好在冷却期，
   // 先切到健康节点再发第一条请求，避免每轮开头又打一次已被封的 IP。
   // 当前出口健康时 keepCurrentIfHealthy 返回 noop；直连站/管理面不可达同样 noop。
-  try {
-    const startSwitch = await rotation.switch('round_start', { keepCurrentIfHealthy: true });
-    if (startSwitch.allCooled) {
-      allNodesCooled = true;
-      gateAborted = true;
-      shouldStopCrawling = true;
-      noteRetryPage(currentPage);
-      log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: currentPage }, site });
-    } else if (startSwitch.ok) {
-      log(`轮首当前出口不可用，已切换代理节点：${startSwitch.from || '当前节点'} → ${startSwitch.to}${staleNote(startSwitch.stale)}`, { event: 'proxy_initial_switch', context: { site, from: startSwitch.from, to: startSwitch.to, stale: !!startSwitch.stale }, site });
-    }
-  } catch (_) {}
+  // 池子已全部冷却时上面已置 shouldStopCrawling，这里连换点都不试。
+  if (!shouldStopCrawling) {
+    try {
+      const startSwitch = await rotation.switch('round_start', { keepCurrentIfHealthy: true });
+      if (startSwitch.allCooled) {
+        allNodesCooled = true;
+        gateAborted = true;
+        shouldStopCrawling = true;
+        noteRetryPage(currentPage);
+        log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: currentPage }, site });
+      } else if (startSwitch.ok) {
+        log(`轮首当前出口不可用，已切换代理节点：${startSwitch.from || '当前节点'} → ${startSwitch.to}${staleNote(startSwitch.stale)}`, { event: 'proxy_initial_switch', context: { site, from: startSwitch.from, to: startSwitch.to, stale: !!startSwitch.stale }, site });
+      }
+    } catch (_) {}
+  }
 
   while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
     const batchStartPage = currentPage;
@@ -906,7 +991,10 @@ async function crawl(a, b, c, d) {
         // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
         if (result.gateAbort) {
           gateAborted = true;
-          if (result.probeLimitReached) {
+          if (result.probeTimeoutReached) {
+            probeTimedOut = true;
+            log(`第一页探针超过时间上限，暂停本轮 [${site}]`, { level: 'warn', event: 'first_page_probe_timeout', context: { site, page: pageNo, status }, site });
+          } else if (result.probeLimitReached) {
             probeLimited = true;
             log(`第一页探针达到节点上限，暂停本轮以保护剩余出口 [${site}]`, { level: 'warn', event: 'first_page_probe_limited', context: { site, page: pageNo, status }, site });
           } else if (result.allCooled) {
@@ -1131,9 +1219,9 @@ async function crawl(a, b, c, d) {
   const successSuffix = totalFailed > 0 && !nothingSucceeded ? `（成功 ${pagesSucceeded} 页）` : '';
   const narrowedSuffix = realTotalPagesObserved !== undefined && effectiveTotalPages < totalPages ? `，站点总页数 ${realTotalPagesObserved}，按 ${effectiveTotalPages} 页停止` : '';
   const gateSuffix = gateAborted
-    ? (probeLimited ? '，第一页探针达到上限已暂停' : allNodesCooled ? '，全部代理节点仍在冷却期' : '，第一页探针轮尽已取消抓取')
+    ? (probeTimedOut ? '，第一页探针超时已暂停' : probeLimited ? '，第一页探针达到上限已暂停' : allNodesCooled ? '，全部代理节点仍在冷却期' : '，第一页探针轮尽已取消抓取')
     : '';
-  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页${successSuffix}，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${allFailedSuffix}${narrowedSuffix}${gateSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, pagesSucceeded, nothingSucceeded, endReached, durationMs, stoppedBySignal, gateAborted, probeLimited, allNodesCooled, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
+  log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页${successSuffix}，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${allFailedSuffix}${narrowedSuffix}${gateSuffix}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, pagesSucceeded, nothingSucceeded, endReached, durationMs, stoppedBySignal, gateAborted, probeLimited, probeTimedOut, allNodesCooled, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
 }
 
 function readRecentIds(site) {
@@ -1158,7 +1246,7 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, getRotation, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, hasProxyProvider, prepareProxyPool, getRotation, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD, MIN_USABLE_POOL };
 
 
 function normalizePublishDateSafe(value) {
