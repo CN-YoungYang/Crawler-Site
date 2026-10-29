@@ -1,4 +1,4 @@
-const { crawl, isStopping, sleepInterruptible, refreshProxyProviders } = require('./crawler');
+const { crawl, isStopping, sleepInterruptible, refreshProxyProviders, hasProxyProvider } = require('./crawler');
 const { generateReport, generateNav } = require('./report');
 const { log } = require('./log');
 const { startServer } = require('./server');
@@ -342,10 +342,12 @@ if (require.main === module) {
     log(`预生成导航页失败: ${e.message}`, { level: 'warn', event: 'nav_pre_failed', context: { error: e.message } });
   });
   // 启动先拉取订阅更新：easy_proxies 节点池随远端订阅变动，先刷新保证首轮换点（第一页探针）拿到最新节点。
-  // 不阻塞调度（fire-and-forget）；crawl() 每轮开始也会刷新兜底，失败由 refreshProviders 内部告警
-  Promise.all(env.sites.map(s => refreshProxyProviders(s))).then(results => {
+  // 不阻塞调度（fire-and-forget）；crawl() 每轮开始会按池子状态决定要不要刷新，失败由 refreshProviders 内部告警。
+  // 分母只算「真的配了代理提供方」的站点：没有代理的站点既不会刷新，也不该拉低比例（旧日志里的 1/2 就是这么来的）。
+  const proxySites = env.sites.filter(hasProxyProvider);
+  Promise.all(proxySites.map(s => refreshProxyProviders(s))).then(results => {
     const refreshed = results.filter(Boolean).length;
-    if (refreshed) log(`启动订阅刷新完成：${refreshed}/${env.sites.length} 个代理站点已拉取最新订阅`, { event: 'startup_refresh_done', context: { refreshed } });
+    if (refreshed) log(`启动订阅刷新完成：${refreshed}/${proxySites.length} 个代理站点已拉取最新订阅`, { event: 'startup_refresh_done', context: { refreshed, proxySites: proxySites.length } });
   });
   // 优雅关闭：随爬虫 stopping 一并关闭 HTTP 服务
   if (httpServer) {
