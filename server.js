@@ -86,6 +86,24 @@ function buildHealthPayload() {
   return { status: 'ok', timestamp: now, uptime, navExists, navGeneratedAt, totals: { sites: 0, dates: 0, records: 0 }, sites: [] };
 }
 
+// 站点状态汇总：crawler 写 state/<site>/status.json，这里只读。
+// 读不到就当没有（新环境第一秒就要能返回 200），绝不因为缺文件把探针判死。
+function buildStatusPayload() {
+  const sites = {};
+  try {
+    const root = path.join(process.cwd(), 'state');
+    if (fs.existsSync(root)) {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        try {
+          sites[entry.name] = JSON.parse(fs.readFileSync(path.join(root, entry.name, 'status.json'), 'utf8'));
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  return { status: 'ok', timestamp: new Date().toISOString(), sites };
+}
+
 function createServer({ port = 8080, root } = {}) {
   const fileRoot = root || resolveFileRoot();
 
@@ -113,6 +131,19 @@ function createServer({ port = 8080, root } = {}) {
         return res.end();
       }
       res.writeHead(200, headers);
+      return res.end(body);
+    }
+
+    // 业务状态：与 /health 分开。healthcheck 只看存活，这里看「漏没漏」。
+    if (urlPath === '/status' || urlPath === '/api/status') {
+      const body = JSON.stringify(buildStatusPayload());
+      const headers = {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Cache-Control': 'no-store',
+      };
+      res.writeHead(200, headers);
+      if (req.method === 'HEAD') return res.end();
       return res.end(body);
     }
 
@@ -201,4 +232,4 @@ function startServer({ port } = {}) {
   return server;
 }
 
-module.exports = { createServer, startServer, buildHealthPayload, mimeFor, safeJoin };
+module.exports = { createServer, startServer, buildHealthPayload, buildStatusPayload, mimeFor, safeJoin };

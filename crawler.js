@@ -6,8 +6,9 @@ const path = require('path');
 const { log } = require('./log');
 const { getSiteConfig, normalizeSite } = require('./sites');
 const easyProxies = require('./sites/_easy_proxies');
-const { shanghaiDateStr, hasValidXlsxHeader } = require('./utils');
+const { shanghaiDateStr, hasValidXlsxHeader, writeJsonAtomic } = require('./utils');
 const proxyRotation = require('./proxyRotation');
+const ledger = require('./ledger');
 const { createBreaker, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD } = require('./breaker');
 
 // 默认站点策略（原 sites/_base.js，已内联避免单实现抽象层）
@@ -61,6 +62,20 @@ const BACKOFF_BASE_MS = 2000;
 const BACKOFF_CAP_MS = 60000;
 // 真实浏览器 UA，避免默认 axios UA 被站点日志一眼识别为爬虫
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// ---- 头部补扫（只在续跑时启用：尾部游标 > 1）----
+// 每轮最多补扫的头部页数。取值依据：站点每轮只放行约 30 页（05:09 实测 1-30 通过、31-40 全 468），
+// 补扫吃掉一半配额、剩一半推进尾部。默认 15 页，验尸结论出来前不做自适应。
+const HEAD_SCAN_MAX_PAGES = Math.max(1, Math.floor(Number(process.env.HEAD_SCAN_MAX_PAGES) || 15));
+// 连续几页整页无新增才判定「追平了」。单页不足为凭：页面会漂移，新公告可能正好跨页。
+const HEAD_SCAN_ZERO_STREAK = 2;
+// 每轮总页数预算：站点每轮只放行约 30 页（2026-10-29 实测 1-30 通过、31-40 全 468），
+// 超出部分只会换来一段 468。头部补扫最多吃一半，剩下的留给尾部推进。
+const SCAN_PAGE_BUDGET = Math.max(1, Math.floor(Number(process.env.SCAN_PAGE_BUDGET) || 30));
+// 同一页连续几轮命中 468 才允许跳过。468 是 IP 级风控，不是数据边界。
+const BLOCK_SKIP_ROUNDS = 2;
+// 跳过之后最多再复活探测几轮，超过就放弃并升级日志级别。
+const PENDING_GIVE_UP_ROUNDS = 3;
 
 // ---- 代理（ceb 换 IP 绕过 WAF，轻量替代浏览器引擎） ----
 // 优先级：PROXY_<SITE> / <SITE>_PROXY_URL > PROXY_URL > HTTPS_PROXY/HTTP_PROXY > siteConfig.proxyUrl
@@ -253,8 +268,9 @@ function readXlsxRowsSafe(filePath, site, event = 'recent_read_failed') {
 function fileDir(site) {
   return path.join('file', normalizeSite(site));
 }
+// 兼容旧导出名：stateFile() 现在指向 state/<site>/checkpoint.json。
 function stateFile(site) {
-  return path.join(`state-${normalizeSite(site)}.json`);
+  return checkpointFile(site);
 }
 
 // 退避延迟（纯函数，便于测试）：指数 base*2^attempt，封顶 cap，全量抖动 [0, delay)。
@@ -713,41 +729,176 @@ async function sleepInterruptible(ms) {
   return !stopping;
 }
 
-function loadCheckpoint(site) {
-  const file = stateFile(site);
-  if (!fs.existsSync(file)) return null;
-  try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    let cp = Number(raw.currentPage);
-    if (!Number.isFinite(cp) || !Number.isInteger(cp) || cp < 1) {
-      log(`断点 currentPage 非法 (${String(raw.currentPage)})，已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw.currentPage), site: normalizeSite(site) }, site: normalizeSite(site) });
-      return null;
+// ---- 断点（v2：纯游标）----
+// v1 里断点同时背 `existingIds`（去重集）和游标，导致两个职责互相拖累：
+// 断点清了去重集就退回 2 天 Excel 窗口，断点留着去重集又只增不减。
+// v2 把 id 交给 ledger.js，断点只回答四个问题：扫到哪、扫过哪些页、哪些页被风控跳过、
+// 上一次完整扫描是什么时候。文件名也从 state-<site>.json 换成 state/<site>/checkpoint.json，
+// 这样整个 state/ 可以作为一个卷挂进容器（旧路径在可写层里，重建即丢）。
+const CHECKPOINT_VERSION = 2;
+
+function checkpointFile(site) {
+  return path.join('state', normalizeSite(site), 'checkpoint.json');
+}
+
+function legacyCheckpointFile(site) {
+  return path.join(`state-${normalizeSite(site)}.json`);
+}
+
+function newCheckpoint() {
+  return {
+    v: CHECKPOINT_VERSION,
+    currentPage: 1,
+    realTotalPages: null,
+    sweepId: 0,
+    visited: [],
+    pending: [],
+    blockCounts: {},
+    headScannedAt: null,
+    lastSweepCompletedAt: null,
+    consecutiveIncompleteRounds: 0
+  };
+}
+
+function normalizeRanges(list) {
+  if (!Array.isArray(list)) return [];
+  const pairs = [];
+  for (const entry of list) {
+    if (!Array.isArray(entry) || entry.length !== 2) continue;
+    const start = Math.floor(Number(entry[0]));
+    const end = Math.floor(Number(entry[1]));
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) continue;
+    pairs.push([start, end]);
+  }
+  pairs.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [start, end] of pairs) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+function markVisited(ranges, page) {
+  return markRange(ranges, page, page);
+}
+
+// 把 [start, end] 整段标为已访问：撞到边界时用它把「边界及其之后」一次性记平——
+// 那些页本来就不存在，留着缺口会让游标永远回退到一个取不到数据的地方。
+function markRange(ranges, start, end) {
+  const from = Math.floor(Number(start));
+  const to = Math.floor(Number(end));
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) return ranges;
+  const merged = normalizeRanges([...ranges, [from, to]]);
+  ranges.length = 0;
+  ranges.push(...merged);
+  return ranges;
+}
+
+function visitedCount(ranges) {
+  return ranges.reduce((sum, [start, end]) => sum + (end - start + 1), 0);
+}
+
+// 最老的「还欠着」的页：既没访问过、也不在待补清单里。
+// 游标就该停在这里——跳过 pending 是为了不被一个永远打不开的页钉死，
+// 反之「跳过的页要留在 pending 里」也是同一个不变量的一半。
+function oldestUnvisited(ranges, total, pendingPages) {
+  const merged = normalizeRanges(ranges);
+  const pending = pendingPages instanceof Set ? pendingPages : new Set(pendingPages || []);
+  let cursor = 1;
+  for (const [start, end] of merged) {
+    while (cursor < start) {
+      if (!pending.has(cursor)) return cursor;
+      cursor++;
     }
-    let ids = raw.existingIds;
-    if (!Array.isArray(ids)) ids = [];
-    ids = ids.filter(x => typeof x === 'string' && x);
-    const observed = Number(raw.realTotalPages);
-    return {
-      currentPage: cp,
-      existingIds: new Set(ids),
-      realTotalPages: Number.isInteger(observed) && observed > 0 ? observed : undefined
-    };
+    if (cursor < end + 1) cursor = end + 1;
+  }
+  while (cursor <= total) {
+    if (!pending.has(cursor)) return cursor;
+    cursor++;
+  }
+  return null;
+}
+
+function loadCheckpoint(site) {
+  // v1 断点不兼容：里面有 existingIds，语义和 v2 冲突。留着只会误导续跑，
+  // 所以见到就删、并留一条 warn——重装环境里本来也不该存在。
+  const legacy = legacyCheckpointFile(site);
+  if (fs.existsSync(legacy)) {
+    try { fs.unlinkSync(legacy); } catch (_) {}
+    log('检测到 v1 断点（含 existingIds），结构不兼容，已删除并从头开始', {
+      level: 'warn', event: 'checkpoint_legacy_ignored',
+      context: { file: legacy, site: normalizeSite(site) }, site: normalizeSite(site)
+    });
+  }
+  const file = checkpointFile(site);
+  if (!fs.existsSync(file)) return null;
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
     log(`断点读取失败，从头开始：${error.message}`, { level: 'warn', event: 'checkpoint_load_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
     return null;
   }
+  if (!raw || Number(raw.v) !== CHECKPOINT_VERSION) {
+    log(`断点版本不匹配（v=${String(raw && raw.v)}），已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw && raw.v), site: normalizeSite(site) }, site: normalizeSite(site) });
+    return null;
+  }
+  const page = Number(raw.currentPage);
+  if (!Number.isInteger(page) || page < 1) {
+    log(`断点 currentPage 非法 (${String(raw.currentPage)})，已丢弃重跑`, { level: 'warn', event: 'checkpoint_invalid', context: { raw: String(raw.currentPage), site: normalizeSite(site) }, site: normalizeSite(site) });
+    return null;
+  }
+  const observed = Number(raw.realTotalPages);
+  const cp = newCheckpoint();
+  cp.currentPage = page;
+  cp.realTotalPages = Number.isInteger(observed) && observed > 0 ? observed : null;
+  cp.sweepId = Number.isInteger(Number(raw.sweepId)) && Number(raw.sweepId) >= 0 ? Number(raw.sweepId) : 0;
+  cp.visited = normalizeRanges(raw.visited);
+  cp.pending = Array.isArray(raw.pending)
+    ? raw.pending
+      .map(entry => ({
+        page: Math.floor(Number(entry && entry.page)),
+        rounds: Math.max(0, Math.floor(Number(entry && entry.rounds) || 0)),
+        gaveUp: !!(entry && entry.gaveUp)
+      }))
+      .filter(entry => Number.isInteger(entry.page) && entry.page >= 1)
+    : [];
+  cp.blockCounts = (raw.blockCounts && typeof raw.blockCounts === 'object') ? { ...raw.blockCounts } : {};
+  cp.headScannedAt = typeof raw.headScannedAt === 'string' ? raw.headScannedAt : null;
+  cp.lastSweepCompletedAt = typeof raw.lastSweepCompletedAt === 'string' ? raw.lastSweepCompletedAt : null;
+  cp.consecutiveIncompleteRounds = Number.isInteger(Number(raw.consecutiveIncompleteRounds)) ? Number(raw.consecutiveIncompleteRounds) : 0;
+  return cp;
 }
 
-function saveCheckpoint(site, currentPage, existingIds, realTotalPages) {
-  const file = stateFile(site);
-  const state = { currentPage, existingIds: Array.from(existingIds) };
-  if (Number.isInteger(realTotalPages) && realTotalPages > 0) state.realTotalPages = realTotalPages;
-  fs.writeFileSync(file, JSON.stringify(state), 'utf8');
+function saveCheckpoint(site, cp) {
+  const file = checkpointFile(site);
+  const payload = {
+    v: CHECKPOINT_VERSION,
+    currentPage: cp.currentPage,
+    realTotalPages: Number.isInteger(cp.realTotalPages) && cp.realTotalPages > 0 ? cp.realTotalPages : null,
+    sweepId: cp.sweepId,
+    visited: normalizeRanges(cp.visited),
+    pending: cp.pending,
+    blockCounts: cp.blockCounts,
+    headScannedAt: cp.headScannedAt,
+    lastSweepCompletedAt: cp.lastSweepCompletedAt,
+    consecutiveIncompleteRounds: cp.consecutiveIncompleteRounds,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonAtomic(file, payload);
 }
 
-function clearCheckpoint(site) {
-  const file = stateFile(site);
-  if (fs.existsSync(file)) fs.unlinkSync(file);
+// /status 的落盘端：crawler 只写，server 只读。两边界之间没有函数调用，
+// 所以静态服务不必依赖 crawler 的任何内部结构（也就不会被爬虫重构牵连）。
+function writeStatus(site, payload) {
+  const file = path.join('state', normalizeSite(site), 'status.json');
+  try {
+    writeJsonAtomic(file, payload);
+  } catch (error) {
+    log(`状态文件写入失败：${error.message}`, { level: 'warn', event: 'status_write_failed', context: { error: error.message, site: normalizeSite(site) }, site: normalizeSite(site) });
+  }
 }
 
 function normalizeCrawlArgs(a, b, c, d) {
@@ -838,17 +989,46 @@ async function crawl(a, b, c, d) {
   } catch (_) {}
 
   const checkpoint = loadCheckpoint(site);
-  let currentPage;
-  let existingIds;
-  if (checkpoint) {
-    currentPage = checkpoint.currentPage;
-    existingIds = checkpoint.existingIds;
-    log(`从断点续跑 [${site}]，起始页 ${currentPage}，已记录 ${existingIds.size} 个 id`, { event: 'checkpoint_resume', context: { site, currentPage, knownIds: existingIds.size }, site });
-  } else {
-    currentPage = 1;
-    existingIds = readRecentIds(site);
+  const cp = checkpoint || newCheckpoint();
+  // 去重真相源是台账；台账为空（新环境首次运行）才退回最近两天 Excel。
+  const ledgerMap = ledger.loadLedger(site);
+  // 台账保留 35 天：每轮开头裁一次，避免 ids.json 只增不减（每批写盘都全量重写，体积会拖慢）。
+  try {
+    const pruned = ledger.pruneLedger(ledgerMap);
+    if (pruned) {
+      ledger.saveLedger(site, ledgerMap);
+      log(`台账清理过期记录 ${pruned} 条（保留 ${ledger.RETENTION_DAYS} 天）`, { event: 'ledger_pruned', context: { site, removed: pruned, remaining: ledgerMap.size }, site });
+    }
+  } catch (error) {
+    log(`台账清理失败，继续本轮：${error.message}`, { level: 'warn', event: 'ledger_prune_failed', context: { error: error.message, site }, site });
   }
-  const runStartPage = currentPage;
+  let existingIds = ledger.ledgerIds(ledgerMap);
+  if (existingIds.size === 0) {
+    existingIds = readRecentIds(site);
+    if (existingIds.size) {
+      log(`台账为空，回退到最近两天 Excel 去重（${existingIds.size} 个 id）`, { event: 'ledger_fallback_excel', context: { site, knownIds: existingIds.size }, site });
+    }
+  }
+  // 尾部游标 = 断点记的那个页。头部补扫每轮都从第 1 页起，只影响本轮，不推进尾部游标——
+  // 两段交替写同一个字段就会回到「谁后写谁赢」，2026-10-27 的 6→11→16 就是这么来的。
+  const tailStartPage = cp.currentPage;
+  // 头部最多吃掉本轮预算的一半：预算被调小时（SCAN_PAGE_BUDGET < 2×HEAD_SCAN_MAX_PAGES）
+  // 也要保证尾部还能前进，否则「补扫」会把整轮配额吃光、游标原地不动。
+  const headScanMaxPages = Math.min(HEAD_SCAN_MAX_PAGES, Math.max(1, Math.floor(SCAN_PAGE_BUDGET / 2)));
+  let headPhase = tailStartPage > 1;
+  let headPagesFetched = 0;
+  // 本轮还剩多少页额度（含待补页复活那一发）
+  let pagesBudgetLeft = Math.max(0, SCAN_PAGE_BUDGET - (cp.pending.length ? 1 : 0));
+  let headZeroStreak = 0;
+  let headScanEndPage = null;
+  let tailCursor = tailStartPage;
+  let currentPage = 1;
+  if (headPhase) {
+    log(`从断点续跑 [${site}]，尾部游标 ${tailStartPage}，本轮先补扫头部最多 ${headScanMaxPages} 页，已记录 ${existingIds.size} 个 id`, { event: 'checkpoint_resume', context: { site, tailPage: tailStartPage, headScanMaxPages, knownIds: existingIds.size }, site });
+  } else {
+    log(`从头开始 [${site}]，已记录 ${existingIds.size} 个 id`, { event: 'crawl_from_start', context: { site, knownIds: existingIds.size }, site });
+  }
+  const runStartPage = tailStartPage;
   // 主动按页轮换：站点可声明 rotateEveryPages，避免一轮所有页都压在同一个出口 IP 上。
   const rotateEveryPages = Number(siteConfig.rotateEveryPages) > 0
     ? Math.max(1, Math.floor(Number(siteConfig.rotateEveryPages)))
@@ -869,15 +1049,14 @@ async function crawl(a, b, c, d) {
   let fileWriteSucceeded = 0;
   const failedIds = new Set();
   let endReached = false;
-  // 最先返回边界的页号：边界之后的页本来就不存在，针对它们的重试点没有意义
-  // （见收尾处的断点判定）。null 表示本轮没碰过边界。
-  let boundaryPage = null;
   // 第一页探针轮尽/限次/全冷却：判定出口不可用，取消本次抓取
   let gateAborted = false;
   let probeLimited = false;
   let probeTimedOut = false;
   let allNodesCooled = false;
   let retryFromPage = null;
+  // 本批首个「该重爬」的页（被跳过的 468 页不算），批级重试点的取值依据
+  let batchFirstFailedPage = null;
   // 断点唯一的不变量：只前移，不越过失败页。
   // 页面级失败、三个熔断分支（WAF/405/网络连败）、写盘失败、第一页探针轮尽
   // 都必须经由它记录，否则后发生的事件会把断点推到更晚的页，更早的失败页
@@ -886,14 +1065,104 @@ async function crawl(a, b, c, d) {
     if (!Number.isInteger(page) || page < 1) return;
     retryFromPage = retryFromPage === null ? page : Math.min(retryFromPage, page);
   }
+  // 468 逃逸：同一页连续 BLOCK_SKIP_ROUNDS 轮命中才允许跳过。
+  // 返回 true 表示「本轮跳过它」——调用方据此不再 noteRetryPage，游标得以前移；
+  // 被跳过的页进 pending，轮首有一次复活探测（见 revivePendingPage）。
+  // 只看 http468：safeline / acw 的语义是「页尾」或「求解失败」，跳过去就是丢数据。
+  // 批级重试点：优先用本批真实失败页，而不是批次起始页。
+  // 旧写法（noteRetryPage(batchStartPage)）在「第 1-3 页成功、第 4-6 页被拦」时
+  // 会把游标拉回第 1 页——整窗重扫，正是「续跑追不上新增」的一半成因。
+  // 本批失败页若全是被跳过的 468 页，就一个字都不记，让游标真的前进。
+  function noteBatchRetry() {
+    if (batchFirstFailedPage !== null) noteRetryPage(batchFirstFailedPage);
+  }
+  function registerBlockedPage(page, shieldType) {
+    if (shieldType !== 'http468') return false;
+    const key = String(page);
+    const rounds = Number(cp.blockCounts[key] || 0) + 1;
+    cp.blockCounts[key] = rounds;
+    if (rounds < BLOCK_SKIP_ROUNDS) return false;
+    // rounds 记的是「复活探测失败了几次」，不是被拦了几轮：放弃条件是探测 3 次仍失败。
+    if (!cp.pending.some(entry => entry.page === page)) cp.pending.push({ page, rounds: 0 });
+    log(`第 ${page} 页连续 ${rounds} 轮被 HTTP 468 拦截，本轮跳过并记入待补清单（共 ${cp.pending.length} 页待补）`, { level: 'warn', event: 'blocked_page_skipped', context: { page, rounds, pendingPages: cp.pending.length, site }, site });
+    return true;
+  }
+  // 单页行入库：去重 → 归日期 → 计数。头部补扫、尾部批次、待补页复活三条路径共用。
+  function collectPageRows(pageData, pageNo, batchData) {
+    let batchNew = 0;
+    for (const item of pageData) {
+      if (existingIds.has(item.id)) continue;
+      const publishDate = normalizePublishDateSafe(item.publishTime);
+      if (!publishDate) {
+        log(`发布日期无效，跳过公告：${String(item.publishTime)}`, {
+          level: 'error', event: 'invalid_publish_date',
+          context: { page: pageNo, id: item.id, publishTime: String(item.publishTime), site }, site
+        });
+        continue;
+      }
+      if (!batchData[publishDate]) batchData[publishDate] = [];
+      batchData[publishDate].push(item);
+      existingIds.add(item.id);
+      totalNew++;
+      batchNew++;
+    }
+    return batchNew;
+  }
+  // 落盘 + 台账跟进。台账只收真正落盘的行：写盘失败的行已经回滚出 existingIds，
+  // 若此时仍记进台账，下一轮会把它们当「已知」直接跳过，等于永久丢数据。
+  function commitBatch(batchData) {
+    const batchPersist = persistDataFiles(site, batchData);
+    fileWriteFailed += batchPersist.fileWriteFailed;
+    fileWriteSucceeded += batchPersist.fileWriteSucceeded;
+    const failedSet = new Set(batchPersist.failedIds);
+    for (const id of failedSet) { failedIds.add(id); existingIds.delete(id); ledgerMap.delete(id); }
+    const rows = Object.values(batchData).flat().filter(item => !failedSet.has(item.id));
+    if (rows.length) {
+      try {
+        ledger.addRows(ledgerMap, rows);
+        ledger.saveLedger(site, ledgerMap);
+      } catch (error) {
+        // 台账写失败不阻塞抓取，但必须留痕：下次运行会重复写这一批。
+        log(`台账写入失败：${error.message}`, { level: 'error', event: 'ledger_save_failed', context: { error: error.message, rows: rows.length, site }, site });
+      }
+    }
+    return batchPersist;
+  }
+  // /status 的观测面：把断点的外部语义直接摊平成可读字段，避免读的人自己算区间。
+  function publishStatus() {
+    writeStatus(site, {
+      site,
+      updatedAt: new Date().toISOString(),
+      startedAt: new Date(startedAt).toISOString(),
+      checkpointPage: cp.currentPage,
+      realTotalPages: cp.realTotalPages ?? null,
+      effectiveTotalPages,
+      sweepId: cp.sweepId,
+      visitedPages: visitedCount(cp.visited),
+      oldestUnvisitedPage: oldestUnvisited(cp.visited, effectiveTotalPages, new Set(cp.pending.map(entry => entry.page))),
+      pendingPages: cp.pending.filter(entry => !entry.gaveUp).map(entry => entry.page),
+      givenUpPages: cp.pending.filter(entry => entry.gaveUp).map(entry => entry.page),
+      headScannedAt: cp.headScannedAt,
+      lastSweepCompletedAt: cp.lastSweepCompletedAt,
+      consecutiveIncompleteRounds: cp.consecutiveIncompleteRounds,
+      lastRound: {
+        totalNew,
+        totalFailed,
+        endReached,
+        fileWriteFailed,
+        fileWriteSucceeded,
+        failedIds: failedIds.size
+      }
+    });
+  }
   // 轮首池子已全部冷却：刷新清不掉 crawler 侧的冷却表，直接暂停本轮——
   // 不刷新、不换点、不发第一发请求。ADR 0008 的「全冷却不白刷」。
   if (poolStatus && poolStatus.allCooled) {
     allNodesCooled = true;
     gateAborted = true;
     shouldStopCrawling = true;
-    noteRetryPage(currentPage);
-    log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: currentPage, rawCount: poolStatus.rawCount }, site });
+    noteRetryPage(tailStartPage);
+    log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: tailStartPage, rawCount: poolStatus.rawCount }, site });
   }
   // 站点分页自报的真实总页数（后观测覆盖前观测，总量可能随发布增长）；
   // 实际生效上限 = min(配置 totalPages, 观测值)，未观测到时等于配置。
@@ -916,22 +1185,76 @@ async function crawl(a, b, c, d) {
         allNodesCooled = true;
         gateAborted = true;
         shouldStopCrawling = true;
-        noteRetryPage(currentPage);
-        log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: currentPage }, site });
+        noteRetryPage(tailStartPage);
+        log(`轮首所有代理节点均在冷却期，暂停本轮 [${site}]`, { level: 'warn', event: 'all_nodes_cooled', context: { site, page: tailStartPage }, site });
       } else if (startSwitch.ok) {
         log(`轮首当前出口不可用，已切换代理节点：${startSwitch.from || '当前节点'} → ${startSwitch.to}${staleNote(startSwitch.stale)}`, { event: 'proxy_initial_switch', context: { site, from: startSwitch.from, to: startSwitch.to, stale: !!startSwitch.stale }, site });
       }
     } catch (_) {}
   }
 
+  // 轮首复活探测：上一轮被 468 跳过的页里最早那一页，用 1 页配额试一次。
+  // 站点风控是时间窗口的，跳过不等于放弃；但也不能让一个死页每轮都把配额吃掉——
+  // 连续 PENDING_GIVE_UP_ROUNDS 轮探测失败才真正移除。
+  // 只探测「还没放弃」的首项：放弃了就彻底不碰，避免每轮为它白烧一发配额。
+  const reviveTarget = cp.pending.find(entry => !entry.gaveUp);
+  if (reviveTarget && !shouldStopCrawling && !stopping) {
+    const target = reviveTarget;
+    let probe = null;
+    try { probe = await crawlPage(target.page, siteConfig, existingIds, maxRetries, rotation); } catch (_) { probe = null; }
+    if (probe && !probe.failed) {
+      markVisited(cp.visited, target.page);
+      delete cp.blockCounts[String(target.page)];
+      cp.pending = cp.pending.filter(entry => entry !== target);
+      const reviveBatch = Object.create(null);
+      const revivedNew = probe.pageData && probe.pageData.length
+        ? collectPageRows(probe.pageData, target.page, reviveBatch)
+        : 0;
+      if (Object.keys(reviveBatch).length) commitBatch(reviveBatch);
+      log(`待补页第 ${target.page} 页复活成功（新增 ${revivedNew} 条），已移出待补清单`, { event: 'pending_page_revived', context: { page: target.page, newCount: revivedNew, pendingPages: cp.pending.length, site }, site });
+    } else {
+      target.rounds = (target.rounds || 0) + 1;
+      if (target.rounds >= PENDING_GIVE_UP_ROUNDS) {
+        // 标记而不是删除：页仍然「不算欠账」（不会被游标拉回），但状态里看得见，
+        // 事故复盘时能回答「到底哪几页没拿到」。
+        target.gaveUp = true;
+        log(`待补页第 ${target.page} 页连续 ${target.rounds} 轮探测失败，放弃重试（该页数据确认缺失）`, { level: 'error', event: 'pending_page_given_up', context: { page: target.page, rounds: target.rounds, pendingPages: cp.pending.length, site }, site });
+      } else {
+        log(`待补页第 ${target.page} 页仍不可用（第 ${target.rounds} 次探测），保留在待补清单`, { level: 'warn', event: 'pending_page_still_blocked', context: { page: target.page, rounds: target.rounds, site }, site });
+      }
+    }
+  }
+
   while (currentPage <= effectiveTotalPages && !shouldStopCrawling) {
     const batchStartPage = currentPage;
+    const wasHeadBatch = headPhase;
     const batchData = Object.create(null);
     if (stopping) {
       stoppedBySignal = true;
       break;
     }
-    const pagesToCrawl = Math.min(batchSize, effectiveTotalPages - currentPage + 1);
+    // 一道闸门管三件事：batchSize、头部补扫配额（15 页 → 第一批 1-10、第二批 11-15）、
+    // 以及本轮总页数预算。预算耗尽就收工，剩下的页留给下一轮。
+    const headRemaining = headPhase ? Math.max(0, headScanMaxPages - headPagesFetched) : Number.POSITIVE_INFINITY;
+    const pagesToCrawl = Math.min(batchSize, headRemaining, pagesBudgetLeft, effectiveTotalPages - currentPage + 1);
+    batchFirstFailedPage = null;
+    if (pagesToCrawl <= 0) {
+      if (headPhase && pagesBudgetLeft > 0) {
+        headPhase = false;
+        cp.headScannedAt = new Date().toISOString();
+        const jumpTo = Math.max(currentPage, tailStartPage);
+        log(`头部补扫配额用尽 [${site}]：已扫 ${headPagesFetched} 页，续扫从第 ${jumpTo} 页开始`, { event: 'head_scan_done', context: { site, headPagesFetched, headScanEndPage: currentPage - 1, headZeroStreak, jumpTo, tailStartPage, reason: 'quota' }, site });
+        currentPage = jumpTo;
+        tailCursor = jumpTo;
+        continue;
+      }
+      log(`本轮页数预算（${SCAN_PAGE_BUDGET} 页）已用尽 [${site}]，剩余页留给下一轮`, { level: 'warn', event: 'page_budget_exhausted', context: { site, pageBudget: SCAN_PAGE_BUDGET, page: tailCursor }, site });
+      noteRetryPage(tailCursor);
+      shouldStopCrawling = true;
+      break;
+    }
+    pagesBudgetLeft -= pagesToCrawl;
+    if (headPhase) headPagesFetched += pagesToCrawl;
     const proxyUrlAtBatchStart = rotation.currentProxyUrl();
     const crawlPromises = [];
 
@@ -987,7 +1310,17 @@ async function crawl(a, b, c, d) {
       if (failed) {
         failedCount++;
         totalFailed++;
-        noteRetryPage(pageNo);
+        // 头部补扫段不写尾部游标：它每轮都从第 1 页重来，若在这里 noteRetryPage，
+        // 一个头部失败页会把尾部游标拉回页首。头部失败由「下一轮重新补扫」兜底。
+        // 非头部段：468 连续命中同一页才允许跳过（见 registerBlockedPage），其余照旧钉住游标。
+        // 头部段也要登记 468：否则 oldestUnvisited 会把这页当成「还欠着」，
+        // 游标被拉回一个永远打不开的页，逃逸恰好失效在它该生效的场景。
+        // 但头部段不写尾部游标——它每轮都从第 1 页重来。
+        const skippedBlockedPage = registerBlockedPage(pageNo, result.shieldType);
+        if (!headPhase && !skippedBlockedPage) {
+          noteRetryPage(pageNo);
+          if (batchFirstFailedPage === null) batchFirstFailedPage = pageNo;
+        }
         // 第一页探针轮尽：所有代理节点均失败，后续页必然同样被拦/不通，取消本次抓取
         if (result.gateAbort) {
           gateAborted = true;
@@ -1004,7 +1337,7 @@ async function crawl(a, b, c, d) {
             log(`第一页在所有代理节点上均失败，判定出口全部不可用，取消本次抓取 [${site}]`, { level: 'error', event: 'first_page_gate_abort', context: { site, page: pageNo }, site });
           }
           shouldStopCrawling = true;
-          noteRetryPage(batchStartPage);
+          noteRetryPage(batchFirstFailedPage !== null ? batchFirstFailedPage : batchStartPage);
           continue;
         }
         // 非首页换点时也可能发现全部节点都在冷却期：后续页没有可用出口，
@@ -1033,33 +1366,26 @@ async function crawl(a, b, c, d) {
 
       if (ended) {
         batchEndReached = true;
-        if (boundaryPage === null || pageNo < boundaryPage) boundaryPage = pageNo;
+        // 边界页本身不是数据，但它是「到此为止」的锚点：把边界及其之后整段记平，
+        // 否则这些页永远是「缺口」，游标会被一直拉回一个取不到数据的位置。
+        markRange(cp.visited, pageNo, Math.max(pageNo, effectiveTotalPages));
         continue;
       }
 
+      // 成功返回的页（含边界页）计入本轮覆盖：sweep 完成与否只看 1..有效总页数是否全覆盖。
+      // 同时清掉它的 468 连击计数——连续命中要「连续」，中间成功一次就该归零。
+      markVisited(cp.visited, pageNo);
+      if (cp.blockCounts[String(pageNo)] !== undefined) delete cp.blockCounts[String(pageNo)];
       let pageNew = 0;
       if (pageData.length) {
-        let batchNew = 0;
-        for (const item of pageData) {
-          if (existingIds.has(item.id)) continue;
-          const publishDate = normalizePublishDateSafe(item.publishTime);
-          if (!publishDate) {
-            log(`发布日期无效，跳过公告：${String(item.publishTime)}`, {
-              level: 'error', event: 'invalid_publish_date',
-              context: { page: pageNo, id: item.id, publishTime: String(item.publishTime), site }, site
-            });
-            continue;
-          }
-          if (!batchData[publishDate]) batchData[publishDate] = [];
-          batchData[publishDate].push(item);
-          existingIds.add(item.id);
-          totalNew++;
-          batchNew++;
-        }
-        if (batchNew) hasNewDataInBatch = true;
-        pageNew = batchNew;
+        pageNew = collectPageRows(pageData, pageNo, batchData);
+        if (pageNew) hasNewDataInBatch = true;
       }
       log(`第 ${pageNo} 页爬取完成，${pageNew ? '有' : '没有'}新数据`, { event: 'page_done', context: { page: pageNo, newCount: pageNew, site }, site });
+      // 头部补扫的收敛条件：连续 HEAD_SCAN_ZERO_STREAK 页整页无新增即视为追平。
+      if (headPhase) {
+        headZeroStreak = pageNew > 0 ? 0 : headZeroStreak + 1;
+      }
     }
 
     currentPage = batchStartPage + pagesToCrawl;
@@ -1088,11 +1414,11 @@ async function crawl(a, b, c, d) {
       const shieldSummary = shieldLabels[trip.lastShieldType] || `连续 ${trip.consecutiveShield} 页被拦截`;
       log(`${shieldSummary}，判定访问被拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_waf', context: { site, consecutiveShield: trip.consecutiveShield, shieldType: trip.lastShieldType || null, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
+      noteBatchRetry();
     } else if (trip.reason === '405') {
       log(`连续 ${trip.consecutive405} 页 405（本轮已换 IP ${trip.proxy405Switches} 次），判定为站点级拦截，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页，剩余 ${Math.max(0, effectiveTotalPages - currentPage + 1)} 页不再尝试）`, { level: 'error', event: 'circuit_break_405', context: { site, consecutive405: trip.consecutive405, proxySwitches405: trip.proxy405Switches, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
+      noteBatchRetry();
     } else if (trip.switched) {
       // 网络连败换 IP：仅配置了可切换代理提供方的代理站点生效，直连站为 no-op。
       // 每轮连败只切一次并给新节点观察窗口（继续失败至熔断阈值才停），避免逐批反复切点打转
@@ -1102,8 +1428,10 @@ async function crawl(a, b, c, d) {
       // 换 IP 后仍连败：出口节点整体不可用，熔断避免空转（2026-08-24 曾 5 轮 × ~67 分钟全页失败）
       log(`连续 ${trip.netFailStreak} 页网络级失败且已尝试换 IP 仍失败，判定代理出口不可用，提前结束 [${site}]（已试 ${currentPage - 1}/${effectiveTotalPages} 页）`, { level: 'error', event: 'circuit_break_net_fail', context: { site, netFailStreak: trip.netFailStreak, triedPages: currentPage - 1, totalPages, effectiveTotalPages, realTotalPages: realTotalPagesObserved ?? null }, site });
       shouldStopCrawling = true;
-      noteRetryPage(batchStartPage);
-    } else if (!hasNewDataInBatch && failedCount === 0) {
+      noteBatchRetry();
+    } else if (!wasHeadBatch && !hasNewDataInBatch && failedCount === 0) {
+      // 只对尾部批次生效：头部补扫的「零新增」是收敛信号，不是收工信号——
+      // 在这里早停会让续跑轮永远走不到尾部（头部安静 = 新增已经追平，尾部还得推进）。
       log(`当前批次（第 ${currentPage - pagesToCrawl} 到第 ${currentPage - 1} 页）无新数据，停止爬取`, { event: 'early_stop', context: { failedCount, threshold: failureThreshold, site }, site });
       shouldStopCrawling = true;
     } else if (!hasNewDataInBatch && failedCount > 0 && !gateAborted) {
@@ -1112,13 +1440,9 @@ async function crawl(a, b, c, d) {
       log(`当前批次无新数据，但失败 ${failedCount} 页（阈值 ${failureThreshold}），失败页可能掩盖新数据，继续爬取下一批`, { level: 'warn', event: 'continue_despite_failures', context: { failedCount, threshold: failureThreshold, site }, site });
     }
 
-    const batchPersist = persistDataFiles(site, batchData);
-    fileWriteFailed += batchPersist.fileWriteFailed;
-    fileWriteSucceeded += batchPersist.fileWriteSucceeded;
-    for (const id of batchPersist.failedIds) failedIds.add(id);
-    for (const id of batchPersist.failedIds) existingIds.delete(id);
+    const batchPersist = commitBatch(batchData);
     if (batchPersist.fileWriteFailed > 0) {
-      noteRetryPage(batchStartPage);
+      if (!headPhase) noteRetryPage(batchStartPage);
       shouldStopCrawling = true;
     }
 
@@ -1151,8 +1475,31 @@ async function crawl(a, b, c, d) {
       }
     }
 
+    // 头部补扫收尾：配额到顶 / 连续 2 页整页无新增 / 撞边界 / 本轮被叫停。
+    // 收尾后把本轮位置跳到尾部游标（补扫已经覆盖过的页不重复请求）。
+    if (wasHeadBatch) {
+      headScanEndPage = Math.max(headScanEndPage || 0, currentPage - 1);
+      const headDone = headPagesFetched >= headScanMaxPages
+        || headZeroStreak >= HEAD_SCAN_ZERO_STREAK
+        || batchEndReached
+        || shouldStopCrawling;
+      if (headDone) {
+        headPhase = false;
+        cp.headScannedAt = new Date().toISOString();
+        const jumpTo = Math.max(currentPage, tailStartPage);
+        log(`头部补扫结束 [${site}]：扫到第 ${headScanEndPage} 页（${headPagesFetched} 页，连续 ${headZeroStreak} 页无新增），续扫从第 ${jumpTo} 页开始`, { event: 'head_scan_done', context: { site, headPagesFetched, headScanEndPage, headZeroStreak, jumpTo, tailStartPage }, site });
+        currentPage = jumpTo;
+        tailCursor = jumpTo;
+      }
+    } else {
+      tailCursor = currentPage;
+    }
+
     if (!shouldStopCrawling) {
-      saveCheckpoint(site, currentPage, existingIds, realTotalPagesObserved);
+      cp.currentPage = tailCursor;
+      cp.realTotalPages = Number.isInteger(realTotalPagesObserved) ? realTotalPagesObserved : null;
+      saveCheckpoint(site, cp);
+      publishStatus();
     }
 
     if (stopping) {
@@ -1178,27 +1525,43 @@ async function crawl(a, b, c, d) {
   }
 
   if (stopping) stoppedBySignal = true;
-  const checkpointPage = fileWriteFailed > 0 ? runStartPage : (retryFromPage ?? currentPage);
-  // 触达边界是「今天的数据已经到头」：边界**及其之后**的页本来就不存在，
-  // 针对它们的重试点无法靠重爬补回，保留断点只会让下一轮从同一个地方再撞一次边界。
-  // 但边界之前各批的失败是另一回事——那些页真实存在且没抓到，必须照常续跑。
-  // （早先写成「只要 endReached 就整轮不留断点」，会让续跑撞到边界时把起始页
-  //  连同途中的失败一起丢掉，等于凭空跳过了一整段。）
-  const retryPointsAtRealPages =
-    retryFromPage !== null && (boundaryPage === null || retryFromPage < boundaryPage);
-  // 写盘失败是例外——数据真的没落盘，与边界无关，仍要保留断点重试。
-  const endReachedCleanly =
-    endReached && fileWriteFailed === 0 && !stoppedBySignal && !retryPointsAtRealPages;
-  if (!endReachedCleanly && (stoppedBySignal || retryFromPage !== null || fileWriteFailed > 0)) {
-    saveCheckpoint(site, checkpointPage, existingIds, realTotalPagesObserved);
+  // 尾部游标：写盘失败时原地不动（数据没落盘，重爬同一段）；
+  // 其余情况停在最早失败页（不越过失败页），没有失败页就是本轮扫到的位置。
+  // 尾部游标候选：写盘失败原地不动（数据没落盘），否则停在最早失败页，
+  // 没有失败页就是本轮扫到的位置。
+  const scannedPage = fileWriteFailed > 0
+    ? tailStartPage
+    : (retryFromPage === null ? tailCursor : Math.min(retryFromPage, tailCursor));
+  // 完成口径：每一页要么访问过，要么在待补清单里——没有第三种状态。
+  // 撞边界的页、以及边界之后的页都已由 markRange 记平，不会制造假缺口。
+  const pendingSet = new Set(cp.pending.map(entry => entry.page));
+  const owedPage = oldestUnvisited(cp.visited, effectiveTotalPages, pendingSet);
+  const visitedBefore = visitedCount(cp.visited);
+  cp.realTotalPages = Number.isInteger(realTotalPagesObserved) ? realTotalPagesObserved : null;
+  if (owedPage === null && fileWriteFailed === 0 && !stoppedBySignal) {
+    // 一次完整扫描 = 1..有效总页数全覆盖。断点不再删除：sweepId / visited /
+    // lastSweepCompletedAt 必须跨轮存活，否则 /status 永远没有基线。
+    cp.sweepId += 1;
+    cp.visited = [];
+    cp.consecutiveIncompleteRounds = 0;
+    cp.currentPage = 1;
+    cp.lastSweepCompletedAt = new Date().toISOString();
+    log(`完成一次完整扫描 [${site}]：第 1-${effectiveTotalPages} 页全部访问过（sweepId=${cp.sweepId}），下轮从第 1 页开始`, { event: 'sweep_completed', context: { site, sweepId: cp.sweepId, effectiveTotalPages, visitedPages: visitedBefore, pendingPages: cp.pending.length }, site });
+  } else {
+    cp.consecutiveIncompleteRounds += 1;
+    // 游标停在「最老欠账页」，上限是本轮扫到的位置（不越过它）。
+    // owedPage 可能比本轮位置更靠前——头部补扫跳过的空档要靠它填平，
+    // 这不算 2026-10-27 那类回退 bug：方向相反，且重复抓到的行由台账去重。
+    const ceiling = Math.max(1, Math.min(scannedPage, effectiveTotalPages));
+    cp.currentPage = owedPage === null ? ceiling : Math.max(1, Math.min(owedPage, ceiling));
     const checkpointLevel = fileWriteFailed > 0 ? 'error' : 'warn';
     const checkpointEvent = fileWriteFailed > 0
       ? 'checkpoint_retained_on_file_error'
       : stoppedBySignal ? 'graceful_exit' : 'checkpoint_retained';
-    log(`已保留断点（起始页 ${checkpointPage}），下次将续跑`, { level: checkpointLevel, event: checkpointEvent, context: { currentPage: checkpointPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage }, site });
-  } else {
-    clearCheckpoint(site);
+    log(`已保留断点（起始页 ${cp.currentPage}），下次将续跑`, { level: checkpointLevel, event: checkpointEvent, context: { currentPage: cp.currentPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage, oldestUnvisitedPage: owedPage, pendingPages: cp.pending.length }, site });
   }
+  saveCheckpoint(site, cp);
+  publishStatus();
 
   // 本轮结束：注销并销毁换点状态机（含本站 keepAlive 隧道），
   // 下轮以全新实例开始，不存在跨轮残留
@@ -1246,7 +1609,7 @@ function readRecentIds(site) {
   return ids;
 }
 
-module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, hasProxyProvider, prepareProxyPool, getRotation, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD, MIN_USABLE_POOL };
+module.exports = { crawl, crawlPage, backoffDelay, readRecentIds, fileDir, stateFile, checkpointFile, isStopping, sleepInterruptible, extractRealTotalPages, resolveProxyUrl, getProxyAgents, desensitizeProxyUrl, isNoProxy, trySwitchProxy, refreshProxyProviders, hasProxyProvider, prepareProxyPool, getRotation, BATCH_SIZE, FAILURE_STOP_THRESHOLD, REQUEST_TIMEOUT, USER_AGENT, NET_FAIL_SWITCH_THRESHOLD, NET_FAIL_BREAK_THRESHOLD, MIN_USABLE_POOL };
 
 
 function normalizePublishDateSafe(value) {

@@ -13,7 +13,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { mockAxios, freshCrawler, withTempCwd, withNoJitter } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readCheckpoint } = require('./helper');
 const { pageHtml, yfbzbRow } = require('./fixtures');
 const sitesIndex = require('../sites');
 
@@ -71,10 +71,10 @@ async function main() {
       await withNoJitter(() => withBatchSize(10, () => withTempCwd(async () => {
         const { crawl } = freshCrawler();
         await crawl({ site: SITE, totalPages: 10, interval: 0, maxRetries: 1 });
-        assert.ok(
-          !fs.existsSync(`state-${SITE}.json`),
-          '已触达边界属于正常跑完，不应保留断点（否则下一轮从第 1 页重爬起来，反复重爬）'
-        );
+        // 断点文件不再删除（sweepId / lastSweepCompletedAt 必须跨轮存活），
+        // 但「正常跑完」必须让下一轮从第 1 页开始，不能停在被拦的第 2 页上反复重爬。
+        const cp = readCheckpoint(SITE);
+        assert.strictEqual(cp.currentPage, 1, '已触达边界属于正常跑完，下一轮必须从第 1 页开始');
       })));
     } finally {
       restore();
@@ -126,12 +126,8 @@ async function main() {
         await crawl({ site: SITE, totalPages: 20, interval: 0, maxRetries: 1 });
         const end = readCrawlEnd();
         assert.strictEqual(end.endReached, true, '第 2 批触达边界');
-        assert.ok(
-          fs.existsSync(`state-${SITE}.json`),
-          '边界之前的失败页（页 1）真实存在且未抓到，断点必须保留'
-        );
-        const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
-        assert.strictEqual(state.currentPage, 1, '断点应指向最早失败的页 1');
+        const state = readCheckpoint(SITE);
+        assert.strictEqual(state.currentPage, 1, '边界之前的失败页（页 1）真实存在且未抓到，断点必须指向它');
       })));
     } finally {
       restore();

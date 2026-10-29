@@ -5,7 +5,7 @@
 // (d) 连续 2 页求解失败熔断，不空转烧掉整池出口
 const assert = require('assert');
 const fs = require('fs');
-const { mockAxios, freshCrawler, withTempCwd, readEvents } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, readEvents, readCheckpoint } = require('./helper');
 
 const waf = require('../sites/_aliyun_waf');
 const ceb = require('../sites/ceb');
@@ -192,7 +192,7 @@ async function testLastPageUnsolvedChallengeKeepsCheckpoint() {
         !events.some(e => e.event === 'boundary_blocked_last_page'),
         'acw 不适用 SafeLine 的末页边界规则'
       );
-      const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+      const state = readCheckpoint(SITE);
       assert.strictEqual(state.currentPage, 1, '断点应保留在失败页，供下轮续跑');
     });
   } finally {

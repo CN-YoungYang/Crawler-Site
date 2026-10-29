@@ -112,10 +112,12 @@ async function main() {
     });
     try {
       await withNoJitter(() => withTempCwd(async () => {
-        // 断点里已记录该 id，模拟「这一天前面已经抓过，末页全是旧数据」
-        fs.writeFileSync('state-yfbzb.json', JSON.stringify({
-          currentPage: 1,
-          existingIds: ['20250930_542694266']
+        // 台账里已记录该 id，模拟「这一天前面已经抓过，末页全是旧数据」
+        fs.mkdirSync(path.dirname(require('./helper').ledgerPath('yfbzb')), { recursive: true });
+        fs.writeFileSync(require('./helper').ledgerPath('yfbzb'), JSON.stringify({
+          v: 1,
+          // 发布日期用「今天」：台账按 publishDate 保留 35 天，写死 2025 年的日期会被轮前裁剪掉
+          ids: { '20250930_542694266': require('../utils').shanghaiDateStr(0) }
         }), 'utf8');
         const { crawl } = freshCrawler();
         await crawl({ site: 'yfbzb', totalPages: 4, interval: 0, maxRetries: 1 });

@@ -55,13 +55,14 @@ docker compose down
 - `failFast405` 站点（`ceb`）的 GET 405 直接冷却当前节点并换端口，不做 POST 降级；其它站点在 `fallbackOn405` 开启时先降级为 `POST`，双 405 快败。换点后重试仍 405 的页仍计连续 405；非首页每页只重试一次（第二次 405 只冷却节点、不重试），避免逐页烧节点却不熔断。第一页探针会持续换用未尝试节点，直到成功或返回 `gateAbort`；节点池轮尽时 `crawl()` 取消本轮。
 - 连续无状态网络失败达到 `NET_FAIL_SWITCH_THRESHOLD=2` 时换 IP，换点后仍失败达到 `NET_FAIL_BREAK_THRESHOLD=6` 时熔断。
 - WAF 挑战页（HTTP 200 + `_waf_`/`renderData`/`acw_sc__v2`）不是空页：站点 `challenge` 钩子在 vm 沙箱内求解签名 URL 并重放一次；求解失败记为失败页（`shieldType`），连续 2 页熔断。当前仅 `ceb` 启用，求解器在 `sites/_aliyun_waf.js`。
-- 去重以 `id` 为主键：先与今日和昨日 Excel 中的 `readRecentIds(site)` 比较，再在合并写盘时用 `Set` 再次保护，新行优先。
-- `state-<site>.json` 保存 `currentPage`、`existingIds` 和可选的 `realTotalPages`（上轮观测到的站点自报总页数）。正常完成时删除；优雅中断、代理熔断或写盘失败时保留，供下次续跑。
+- 去重以 `id` 为主键：先与 `state/<site>/ids.json` 持久台账比较，再在合并写盘时用 `Set` 再次保护，新行优先；台账缺失/为空时才退回 `readRecentIds(site)` 的两天 Excel 窗口。
+- `state/<site>/checkpoint.json` 是 `v:2` 纯游标：`currentPage`、`visited`（已访问页区间并集）、`pending`（被 468 跳过、待复活的页）、`sweepId`、`lastSweepCompletedAt`、`blockCounts`。正常完成时写回 `currentPage:1` 并递增 `sweepId`（文件不再删除，`lastSweepCompletedAt` 必须跨轮存活）；v1 断点见到即删。
+- 续跑（`currentPage > 1`）先做头部补扫：第 1 页起、连续 2 页零新增即停、上限 `HEAD_SCAN_MAX_PAGES`（默认 15）；补扫不推进尾部游标，结束后跳到尾部位置。468 同一页连续 2 轮才跳过并记入 `pending`，轮首用 1 页配额复活，连续 3 轮失败记 `pending_page_given_up`。`state/<site>/status.json` 是 `/status` 的只读观测面。
 - 输出按 `publishTime` 分组写入 `file/<site>/<date>.xlsx`；历史扁平 `file/*.xlsx` 保留，不迁移。
 
 ## 测试与修改要求
 
-测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 25 个测试套件。
+测试使用 Node 内置断言和 `require.cache` 模拟 `axios`。加载新模拟时先调用 `mockAxios`，再调用 `freshCrawler()`；写入文件的测试使用 `withTempCwd()`。修改后运行 `npm test` 或 `node test/run.js`，当前应通过 33 个测试套件。
 
 不要手工编辑 `file/`、`logs/` 或其他运行时生成文件。修改站点时同步检查 `sites/index.js`、`crawler.js`、`README.md` 和相关测试；修改领域术语或架构决策时阅读 `CONTEXT.md` 和相关 `docs/adr/`。
 

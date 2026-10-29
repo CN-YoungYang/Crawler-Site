@@ -49,9 +49,10 @@ services:
     volumes:
       - ./file:/app/file
       - ./logs:/app/logs
-      # 崩溃断点续跑（按需挂载）
-      # - ./state-yfbzb.json:/app/state-yfbzb.json
-      # - ./state-ceb.json:/app/state-ceb.json
+      # 断点 + 去重台账：state/<site>/checkpoint.json、ids.json、status.json。
+      # 必须挂卷——留在容器可写层里的话，一次 docker compose up --build 就把
+      # 游标和去重集一起抹掉，下一轮从第 1 页、空台账重来。
+      - ./state:/app/state
     depends_on:
       easy_proxies:
         condition: service_started

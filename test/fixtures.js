@@ -8,8 +8,8 @@ function pageHtml(rows) {
 }
 
 // 参数化数据行（同 ROW_NEW 形状，id 可注入）：多页 mock 各页唯一 id，避免误触无新数据早停
-function yfbzbRow(id) {
-  return `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/${id}.html">测试单位采购意向</a></td><td>招标预告</td><td>湖北武汉</td><td>2025/09/30</td></tr>`;
+function yfbzbRow(id, publishTime = '2025/09/30') {
+  return `<tr><td><a class="firstTdAAA" href="/inviteBid/detail/${id}.html">测试单位采购意向</a></td><td>招标预告</td><td>湖北武汉</td><td>${publishTime}</td></tr>`;
 }
 
 // yfbzb 分页控件（结构仿真 yfbzb 真实分页）：

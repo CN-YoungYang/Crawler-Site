@@ -56,7 +56,7 @@ function freshCrawler() {
   return require('../crawler');
 }
 
-// crawl() / readRecentIds() / log / report 均用 cwd 相对的 file/<site>/、logs/<site>/、state-<site>.json，
+// crawl() / readRecentIds() / log / report 均用 cwd 相对的 file/<site>/、logs/<site>/、state/<site>/，
 // 与 withTempCwd 切 cwd 隔离一致（均在每次调用时解析 cwd，不在模块加载时冻结）。
 // 把 cwd 切到临时目录，让写入落到隔离区；隔离区内无今日/昨日真实文件，readRecentIds 返回空 Set，不干扰断言。
 // 用法：await withTempCwd(async dir => { ... })
@@ -105,4 +105,27 @@ async function withNoJitter(fn) {
   try { return await fn(); } finally { Math.random = previous; }
 }
 
-module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter, readEvents };
+// 断点路径：v2 起落在 state/<site>/checkpoint.json（整目录可挂卷）。
+// 测试不自己拼路径，避免实现换布局时十几处一起漂。
+function checkpointPath(site) {
+  return require('path').join('state', String(site).toLowerCase(), 'checkpoint.json');
+}
+
+// 读断点并解析；文件不存在时抛 ENOENT，让「不该有断点」的断言保持直白。
+function readCheckpoint(site) {
+  return JSON.parse(require('fs').readFileSync(checkpointPath(site), 'utf8'));
+}
+
+// 去重台账路径：state/<site>/ids.json。同样只在这里拼一次。
+function ledgerPath(site) {
+  return require('path').join('state', String(site).toLowerCase(), 'ids.json');
+}
+
+function readLedgerIds(site) {
+  const fs = require('fs');
+  const file = ledgerPath(site);
+  if (!fs.existsSync(file)) return [];
+  return Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).ids || {});
+}
+
+module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter, readEvents, checkpointPath, readCheckpoint, ledgerPath, readLedgerIds };

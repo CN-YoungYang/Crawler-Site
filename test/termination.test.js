@@ -10,7 +10,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, readCheckpoint } = require('./helper');
 const { pageHtml, ROW_NEW, yfbzbRow, yfbzbPagination, cebPagination } = require('./fixtures');
 
 async function main() {
@@ -138,7 +138,8 @@ async function main() {
     await withTempCwd(() => {
       fs.mkdirSync(path.join(process.cwd(), '.crawler-test'), { recursive: true });
       process.chdir('.crawler-test');
-      fs.writeFileSync('state-yfbzb.json', JSON.stringify({ currentPage: 5, existingIds: [] }));
+      fs.mkdirSync(path.dirname(require('./helper').checkpointPath('yfbzb')), { recursive: true });
+      fs.writeFileSync(require('./helper').checkpointPath('yfbzb'), JSON.stringify({ v: 2, currentPage: 5, sweepId: 0, visited: [], pending: [] }));
       let calls = 0;
       const restore = mockAxios(() => {
         calls++;
@@ -148,7 +149,7 @@ async function main() {
       return crawl(100, 0).then(() => {
         restore();
         assert.strictEqual(calls, 10, '续跑自页 5 起发一批 10 页（5–14），观测 真实页数=3 < 当前页 15 后条件退出');
-        assert.strictEqual(fs.existsSync('state-yfbzb.json'), false, '干净结束应清除断点');
+        assert.strictEqual(readCheckpoint('yfbzb').currentPage, 1, '干净结束应把游标放回第 1 页');
       });
     });
   }
@@ -172,14 +173,14 @@ async function main() {
       const { crawl } = freshCrawler();
       await withTempCwd(async () => {
         await crawl(1, 0);
-        checkpoint = JSON.parse(fs.readFileSync('state-yfbzb.json', 'utf8'));
+        checkpoint = readCheckpoint('yfbzb');
       });
     } finally {
       xlsx.writeFile = originalWriteFile;
       restoreAxios();
     }
     assert.strictEqual(checkpoint.currentPage, 1, '文件写入失败时必须将断点回退到本次运行的起始页');
-    assert.deepStrictEqual(checkpoint.existingIds, [], '写入失败的记录不能继续被标记为已落盘');
+    assert.deepStrictEqual(require('./helper').readLedgerIds('yfbzb'), [], '写入失败的记录不能进台账（否则下一轮直接跳过它）');
   }
 }
 

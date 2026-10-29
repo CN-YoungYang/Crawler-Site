@@ -7,6 +7,7 @@ yarn-error.log*
 # 运行时产出（绑定挂载的持久化目录，按站点隔离）
 file/
 logs/
+state/
 state*.json
 
 # 本地开发与临时文件

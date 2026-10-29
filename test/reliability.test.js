@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, readCheckpoint, readLedgerIds } = require('./helper');
 const { pageHtml, yfbzbRow } = require('./fixtures');
 
 async function testBatchIsPersistedBeforeNextBatch() {
@@ -41,9 +41,9 @@ async function testFailedPageIsRetainedForResume() {
     const { crawl } = freshCrawler();
     await withTempCwd(async dir => {
       await crawl({ site: 'yfbzb', totalPages: 10, interval: 0, maxRetries: 1 });
-      const state = JSON.parse(fs.readFileSync(path.join(dir, 'state-yfbzb.json'), 'utf8'));
+      const state = readCheckpoint('yfbzb');
       assert.strictEqual(state.currentPage, 2, '失败页必须保留为下次续跑起点');
-      assert.ok(!state.existingIds.includes('000000002'), '失败页的记录不能进入已处理 ID');
+      assert.ok(!readLedgerIds('yfbzb').includes('000000002'), '失败页的记录不能进入台账（否则续跑会直接跳过它）');
     });
   } finally {
     restore();

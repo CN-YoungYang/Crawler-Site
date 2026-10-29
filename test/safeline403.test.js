@@ -9,7 +9,8 @@
 // 接缝：crawlPage() 的返回值 + crawl() 的 crawl_end 事件与 state 文件。
 const assert = require('assert');
 const fs = require('fs');
-const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents } = require('./helper');
+const path = require('path');
+const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, readCheckpoint, checkpointPath } = require('./helper');
 const { pageHtml, yfbzbRow, yfbzbPagination } = require('./fixtures');
 const sitesIndex = require('../sites');
 
@@ -97,7 +98,7 @@ async function main() {
           events.some(e => e.event === 'boundary_blocked_last_page' && e.page === 3 && e.shieldType === 'safeline'),
           '应留下可区分的边界事件（区别于普通 403 边界）'
         );
-        assert.ok(!fs.existsSync(`state-${SITE}.json`), '正常收尾不应保留断点');
+        assert.strictEqual(readCheckpoint(SITE).currentPage, 1, '正常收尾后下一轮必须从第 1 页开始');
       })));
     } finally {
       restore();
@@ -126,7 +127,7 @@ async function main() {
         assert.strictEqual(end.endReached, true, '真实总页数之后的 SafeLine 页应按边界收尾');
         assert.strictEqual(end.totalFailed, 0, '不存在的页被拦截不算失败页');
         assert.strictEqual(end.effectiveTotalPages, 1, '同批观测到的真实总页数应立即收窄上限');
-        assert.ok(!fs.existsSync(`state-${SITE}.json`), '不应把断点留在不存在的页上');
+        assert.strictEqual(readCheckpoint(SITE).currentPage, 1, '不应把游标留在不存在的页上');
       })));
     } finally {
       restore();
@@ -148,7 +149,7 @@ async function main() {
         assert.strictEqual(end.endReached, false, '中途 SafeLine 拦截不能被当成数据边界');
         assert.ok(events.some(e => e.event === 'circuit_break_waf'), '连续 2 页拦截应触发熔断');
         assert.strictEqual(calls, 2, '连续 2 页后熔断，不应逐页打满 10 页');
-        const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+        const state = readCheckpoint(SITE);
         assert.strictEqual(state.currentPage, 1, '断点应指向最早失败的页 1');
       })));
     } finally {
@@ -179,7 +180,7 @@ async function main() {
         const end = events.filter(e => e.event === 'crawl_end').pop();
         assert.strictEqual(end.endReached, false, '配置上限处的拦截不是数据边界');
         assert.strictEqual(end.totalFailed, 1, '真实页被拦应计入失败页');
-        const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+        const state = readCheckpoint(SITE);
         assert.strictEqual(state.currentPage, 2, '断点应保留在第 2 页');
       })));
     } finally {
@@ -214,7 +215,7 @@ async function main() {
       await withNoJitter(() => withSite(SITE, { batchSize: 10 }, () => withTempCwd(async () => {
         const { crawl } = freshCrawler();
         await crawl({ site: SITE, totalPages: 2, interval: 0, maxRetries: 1 });
-        const state1 = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+        const state1 = readCheckpoint(SITE);
         assert.strictEqual(state1.currentPage, 2, 'run1 断点应停在第 2 页');
         assert.strictEqual(state1.realTotalPages, 2, '断点应记录上轮观测到的总页数');
 
@@ -223,7 +224,7 @@ async function main() {
         const events = readEvents(SITE);
         const end = events.filter(e => e.event === 'crawl_end').pop();
         assert.strictEqual(end.endReached, true, '恢复轮应在站点末页收尾');
-        assert.ok(!fs.existsSync(`state-${SITE}.json`), '不得把断点永停末页');
+        assert.strictEqual(readCheckpoint(SITE).currentPage, 1, '不得把游标永停末页');
       })));
     } finally {
       restore();
@@ -238,13 +239,14 @@ async function main() {
     const restore = mockAxios(() => { throw safeLineError(); });
     try {
       await withNoJitter(() => withSite(SITE, { batchSize: 10 }, () => withTempCwd(async () => {
-        fs.writeFileSync(`state-${SITE}.json`, JSON.stringify({ currentPage: 2, existingIds: [] }));
+        fs.mkdirSync(path.dirname(checkpointPath(SITE)), { recursive: true });
+        fs.writeFileSync(checkpointPath(SITE), JSON.stringify({ v: 2, currentPage: 2, sweepId: 0, visited: [], pending: [] }));
         const { crawl } = freshCrawler();
         await crawl({ site: SITE, totalPages: 2, interval: 0, maxRetries: 1 });
         const events = readEvents(SITE);
         const end = events.filter(e => e.event === 'crawl_end').pop();
         assert.strictEqual(end.endReached, true, '无总页数可观测时应按配置上限收尾');
-        assert.ok(!fs.existsSync(`state-${SITE}.json`), '不得把断点永停末页');
+        assert.strictEqual(readCheckpoint(SITE).currentPage, 1, '不得把游标永停末页');
       })));
     } finally {
       restore();

@@ -8,7 +8,7 @@
 // 把它「抬高」到熔断批次的起始页。ceb 的 batchSize=1 才每轮只漂移 1 页，
 // yfbzb 的 batchSize=10 时单轮吞掉最多 9 页。
 //
-// 接缝：crawl({site,totalPages,interval,maxRetries}) 公开接口 + state-<site>.json 内容。
+// 接缝：crawl({site,totalPages,interval,maxRetries}) 公开接口 + state/<site>/checkpoint.json 内容。
 // 期望值来自独立真相源（生产日志的断点轨迹 + 「断点必须指向最早未成功页」的语义），
 // 不是照抄实现：修复前断言失败（断点被抬到熔断批次起始页），修复后为最早失败页。
 const assert = require('assert');
@@ -45,7 +45,7 @@ function netReset() {
 }
 
 function readCheckpoint() {
-  return JSON.parse(fs.readFileSync(`state-${SMALL_BATCH_SITE}.json`, 'utf8'));
+  return JSON.parse(fs.readFileSync(require('./helper').checkpointPath(SMALL_BATCH_SITE), 'utf8'));
 }
 
 async function main() {
@@ -114,7 +114,7 @@ async function main() {
         const { crawl } = freshCrawler();
         // 用 yfbzb 默认 batchSize（10）：批1 页 1-10、批2 页 11-20
         await crawl({ site: 'yfbzb', totalPages: 20, interval: 0, maxRetries: 1 });
-        const checkpoint = JSON.parse(fs.readFileSync('state-yfbzb.json', 'utf8'));
+        const checkpoint = JSON.parse(fs.readFileSync(require('./helper').checkpointPath('yfbzb'), 'utf8'));
         assert.strictEqual(
           checkpoint.currentPage,
           1,

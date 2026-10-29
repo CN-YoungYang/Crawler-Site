@@ -7,7 +7,7 @@
 // 接缝：crawlPage() 的返回值 + crawl() 的 circuit_break_waf / 断点。
 const assert = require('assert');
 const fs = require('fs');
-const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents } = require('./helper');
+const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, readCheckpoint } = require('./helper');
 const { pageHtml, yfbzbRow, yfbzbPagination } = require('./fixtures');
 const sitesIndex = require('../sites');
 
@@ -69,7 +69,7 @@ async function main() {
           '连续 2 页 468 应触发盾页熔断，且日志能区分 http468'
         );
         assert.strictEqual(calls, 4, '第 3、4 页各 1 发即熔断，不应按 maxRetries 反复重试');
-        const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+        const state = readCheckpoint(SITE);
         assert.strictEqual(state.currentPage, 3, '断点应指向最早失败的页 3');
       })));
     } finally {
@@ -97,7 +97,7 @@ async function main() {
         const end = events.filter(e => e.event === 'crawl_end').pop();
         assert.strictEqual(end.endReached, false, '468 不是数据边界，不能删断点');
         assert.strictEqual(end.totalFailed, 1, '末页 468 应如实计失败');
-        const state = JSON.parse(fs.readFileSync(`state-${SITE}.json`, 'utf8'));
+        const state = readCheckpoint(SITE);
         assert.strictEqual(state.currentPage, 3, '断点应保留在末页');
       })));
     } finally {

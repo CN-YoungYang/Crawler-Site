@@ -21,7 +21,9 @@
 | **有效页数上限** | `min(配置 TOTAL_PAGES, 站点分页自报真实总页数)`——成功页经可选钩子 `parseTotalPages($, html, siteConfig)` 提取（yfbzb 取 `.pagination` 内「共 N 条」÷ pageSize；ceb 取「共 N 页」），`crawl()` 每批在逐页判定**之前**合并重算（后观测覆盖前观测；同一批里第 99 页的观测要先于第 100 页的末页判定生效），循环条件与批次收窄均用之；未观测/解析失败时退化为仅配置值。绝不读统计横幅的存量总数（如 yfbzb「近1个月共76470条」）。 | `crawler.js#extractRealTotalPages`, `crawler.js#crawl`, `sites/yfbzb.js#parseTotalPages`, `sites/ceb.js#parseTotalPages` |
 | **去重键** | `id` 为主键（经站点 `extractId(link)` 抽取，默认 `link.split("/").pop().split(".")[0]`，即末段去扩展名）；内存侧比对 `readRecentIds(site)`（`file/<site>/` 昨日+今日），写盘侧再次合并去重，新行优先。 | `crawler.js#readRecentIds`, `crawler.js#defaultExtractId` |
 | **分区写盘** | 按 `publishTime` 分组，写入 `file/<site>/YYYY-MM-DD.xlsx`；整文件读-合并-回写，历史扁平 `file/*.xlsx` 保留不迁移；每站按 `batchSize`/`failureThreshold` 独立批次并发与早停。 | `crawler.js#fileDir` |
-| **断点** | `state-<site>.json`（`stateFile(site)`，cwd 相对），`{ currentPage, existingIds[], realTotalPages? }`（`realTotalPages` 为上轮观测到的站点自报总页数，供恢复轮在无成功页可观测时判定末页），每批写入、正常完成即删，仅供当日崩溃续跑，`SIGINT/SIGTERM` 优雅退出时保留以便下次续跑。 | `crawler.js#stateFile` |
+| **断点** | `state/<site>/checkpoint.json`（`checkpointFile(site)`，cwd 相对，`v:2` 纯游标），`{ currentPage, visited[区间], pending[], blockCounts, sweepId, lastSweepCompletedAt, consecutiveIncompleteRounds }`。游标停在「最老欠账页」（没访问过、也不在 `pending` 的最早页）；每批写入；完整扫描后写回 `currentPage:1` 并递增 `sweepId`，文件不删除。 | `crawler.js#checkpointFile` |
+| **去重台账** | `state/<site>/ids.json`，`{ v:1, ids: { <id>: <publishDate> } }`，原子写、按发布日期保留 35 天；去重唯一真相源，缺失/为空时才退回 `readRecentIds()` 的两天 Excel 窗口。 | `ledger.js` |
+| **头部补扫** | 续跑（`currentPage > 1`）时从第 1 页补扫，连续 2 页零新增即停、上限 `HEAD_SCAN_MAX_PAGES`；不推进尾部游标，结束后跳到尾部位置。 | `crawler.js#crawl` |
 | **双通道日志** | 控制台中文（`[ISO][PID][site]`，`docker logs` 按站点可区分）+ 结构化 JSONL `logs/<site>/crawler-YYYY-MM-DD.jsonl`（`event`/`site` 可检索），30 天保留；多站点并发时 `log(msg,{site})` 必须显式传 `site`，`logDir(site)`/`pruneOldLogs(site)` 按站点隔离。 | `log.js#log, logDir, pruneOldLogs` |
 | **保留窗口** | 30 天，Excel 与日志同窗口；`report.js#scanFiles` 清过期 xlsx，`report.js#generateReport` 触发 `log.js#pruneOldLogs(site)`。 | `report.js`, `log.js` |
 | **报告** | `scanFiles(site)` + `buildIndexHtml`/`buildDetailHtml` + `generateReport(site)`/`generateAllReports(sites)`（后者 `Promise.all` 并发），索引页内联跨全部日期最新 `LATEST_PREVIEW_COUNT`=10 条「最新公告」预览（每行带日期列，其余数据轻量不内联），产物 `file/<site>/index.html`、`tokens.css`、`<date>.html`。 | `report.js` |
@@ -31,7 +33,7 @@
 | **健康探针** | `GET /health`/`/healthz`/`/api/health` 返回 `{status,timestamp,uptime,navExists,navGeneratedAt,totals:{sites:0,dates:0,records:0},sites:[]}`（轻量存活检查，不扫描 xlsx，`no-store`，`HEAD` 支持），供 `docker-compose.yml#healthcheck`（`node require('http').get`）、反代后端摘除与监控告警使用。 | `server.js#buildHealthPayload` |
 | **陈旧快照换点** | 代理提供方在本轮已缓存节点快照时零请求短路（不再查管理 API）所完成的换点。此时端口号确实变了，但**出口可用性未经确认**。快照属于本轮 `proxyRotation` 实例：成功页会 `reset()` 清空，故只可能来自本轮更早的一次成功换点，**不跨轮残留**。`sites/_easy_proxies.js#fetchNodes` 回报 `source`（`'api'` / `'snapshot'`），`switchNode` 将其透出；`proxyRotation` 转成 `stale` 布尔位，`crawlPage`/`crawl` 在日志中标注「（未验证，沿用本轮早先节点快照）」并写入 context。判据是本次是否真的查询了管理 API，**不是**「已切换节点」是否出现，也不是「管理面掉线」。安全降级到直连（无代理部署）属预期行为，见 `DEPLOY.md` 第 0 节。 | `sites/_easy_proxies.js#fetchNodes`, `sites/_easy_proxies.js#switchNode`, `proxyRotation.js`, `crawler.js#crawlPage` |
 | **调度** | `index.js#parseEnv`（`SITES` 列表 + 每站 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG`/`HTTP_PORT`/`HTTP_ENABLED`，环境变量优先、命令行参数回退）→ `validateInput`（逐站 `getSiteConfig`/`nextCronDelay`，`SITES` 下占位站点警告后跳过）→ `startServer()`+`generateNav()`→`scheduleLoop`（每站 `scheduleLoopForSite` 通过 `Promise.all` 并发）；`CRON_EXPR`/`CRON_<SITE>` 空为单次后常驻，`m h * * *` 为每站独立每日定时，`sleepInterruptible` 1s 轮询 `isStopping()` 以响应 `docker stop` 并关闭 HTTP 服务。 | `index.js` |
-| **容器隔离** | 一容器并发多站点（Compose 默认 `SITES=yfbzb,ceb`，`Promise.all`），`SITES`/`TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`HTTP_PORT`/`HTTP_ENABLED` 区分；`file/<site>/`、`logs/<site>/`、`state-<site>.json` 按站点隔离，`file/index.html` 总导航与 `file/<site>/` 报告由 `server.js` 托管于 `HTTP_PORT`（`EXPOSE 8080`，`healthcheck` 在 `/health`）。`easy_proxies` 旁车服务默认启用，多端口业务端口 `24000-24200`，管理 API `9091`，`TZ=Asia/Shanghai` 固定在镜像与 Compose；`SITE` 单站点兼容。 | `Dockerfile`, `docker-compose.yml`, `server.js`, `sites/_easy_proxies.js`
+| **容器隔离** | 一容器并发多站点（Compose 默认 `SITES=yfbzb,ceb`，`Promise.all`），`SITES`/`TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`HTTP_PORT`/`HTTP_ENABLED` 区分；`file/<site>/`、`logs/<site>/`、`state/<site>/` 按站点隔离，`file/index.html` 总导航与 `file/<site>/` 报告由 `server.js` 托管于 `HTTP_PORT`（`EXPOSE 8080`，`healthcheck` 在 `/health`）。`easy_proxies` 旁车服务默认启用，多端口业务端口 `24000-24200`，管理 API `9091`，`TZ=Asia/Shanghai` 固定在镜像与 Compose；`SITE` 单站点兼容。 | `Dockerfile`, `docker-compose.yml`, `server.js`, `sites/_easy_proxies.js`
 
 ## easy_proxies 配置契约
 
@@ -55,6 +57,8 @@
 - `docs/adr/0002-ceb-keep-legacy-source.md` — ceb 否决切换 ctbpsp.com，维持旧源代理换 IP（2026-08-25）。
 - `docs/adr/0003-ceb-aliyun-waf-challenge.md` — ceb 阿里云 acw 挑战页识别、沙箱求解与重放（2026-10-26）。
 - `docs/adr/0004-yfbzb-safeline-403-boundary.md` — yfbzb SafeLine 403 按站点自报末页位置区分边界与拦截（2026-10-28）。
+- `docs/adr/0005-yfbzb-http468-rate-limit.md` — yfbzb HTTP 468 按风控拦截页快败并熔断（2026-10-28）。
+- `docs/adr/0009-state-v2-ledger-and-head-scan.md` — 断点改纯游标、去重改持久台账、续跑补扫头部与 468 逃逸（2026-10-29）。
 - `docs/adr/0005-yfbzb-http468-rate-limit.md` — yfbzb HTTP 468 按风控拦截页快败并熔断，绝不判为数据边界（2026-10-28）。
 - `docs/adr/0006-proxy-rotation-policy.md` — 代理主动按页轮换、首页探针限次与 405 节点冷却（2026-10-28；首页限次策略由 ADR 0008 修订）。
 - `docs/adr/0008-proxy-pool-refresh-and-probe-policy.md` — 轮前按池子状态刷新、刷新后等收敛、ceb 首页不限次数 + 5 分钟兜底（2026-10-29）。

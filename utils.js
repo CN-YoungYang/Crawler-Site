@@ -21,4 +21,20 @@ function hasValidXlsxHeader(filePath) {
   }
 }
 
-module.exports = { shanghaiDateStr, hasValidXlsxHeader };
+// JSON 原子写：临时文件 + rename。断点、台账、状态文件都走这一条路——
+// 进程在写一半时被杀，读者只会看到旧版本，不会看到半截 JSON。
+function writeJsonAtomic(filePath, payload) {
+  const fs = require('fs');
+  const path = require('path');
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tmp, filePath);
+  } catch (error) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+    throw error;
+  }
+}
+
+module.exports = { shanghaiDateStr, hasValidXlsxHeader, writeJsonAtomic };

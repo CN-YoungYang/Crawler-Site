@@ -398,19 +398,22 @@ docker compose up -d --build
 
 ## 10. 断点续跑
 
-正常完成、触达边界或达到页数上限后，`state-<site>.json` 会被删除。收到 `SIGTERM`、代理熔断或文件写入失败时会保留断点。
+状态目录 `state/<site>/` 里有三类文件：
 
-Compose 默认没有挂载断点。需要容器删除后仍能续跑时，在 crawler 的 `volumes` 中加入实际启用站点的挂载：
+- `checkpoint.json`：断点（`v:2` 纯游标 + 已访问区间 + 待补页 + `sweepId`）。完整扫描一次后写回 `currentPage:1` 并递增 `sweepId`，**文件不再删除**（`lastSweepCompletedAt` 必须跨轮存活）；收到 `SIGTERM`、代理熔断或文件写入失败时保留游标。
+- `ids.json`：去重台账（`id → publishDate`，保留 35 天）。删掉它等于忘掉所有已抓记录，下一轮会把窗口内的数据重写一遍。
+- `status.json`：`GET /status` 的只读观测面（断点页、已访问页数、最老欠账页、待补页、上次完整扫描时间）。
+
+Compose 已默认挂载整个目录，容器重建不会丢：
 
 ```yaml
 volumes:
   - ./file:/app/file
   - ./logs:/app/logs
-  - ./state-yfbzb.json:/app/state-yfbzb.json
-  - ./state-ceb.json:/app/state-ceb.json
+  - ./state:/app/state
 ```
 
-断点只是临时续跑状态，真正的归档对象是 `file/` 和 `logs/`。
+归档对象仍是 `file/` 和 `logs/`；`state/` 是续跑与去重的工作集，备份它可以省掉一次全量重抓。
 
 ## 11. 停止和清理
 

@@ -1,6 +1,6 @@
 # Crawler-Site
 
-Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口）与 `ceb`（中国招标投标公共服务平台·湖北），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state-<site>.json`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 Docker Hub 自动发布。内置轻量静态服务托管 `file/`，根 `/` 为总导航（动态发现 `yfbzb`/`ceb` 入口），每站报告在 `/<site>/`，`GET /health` 提供轻量存活探针供反代/监控与 `docker healthcheck` 使用，适合通过外部反代以域名对外暴露。
+Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（`invitedBidSearch` 查询接口）与 `ceb`（中国招标投标公共服务平台·湖北），按站点与发布日期去重后写入 Excel 文件。支持多站点隔离（`file/<site>/YYYY-MM-DD.xlsx` / `logs/<site>/` / `state/<site>/`），一容器并发多站点、各站独立定时与逻辑（策略化），以 Docker 常驻容器运行并通过 Docker Hub 自动发布。内置轻量静态服务托管 `file/`，根 `/` 为总导航（动态发现 `yfbzb`/`ceb` 入口），每站报告在 `/<site>/`，`GET /health` 提供轻量存活探针供反代/监控与 `docker healthcheck` 使用，`GET /status` 暴露业务观测面（断点页、已访问页数、最老欠账页、待补页、上次完整扫描时间），适合通过外部反代以域名对外暴露。
 
 > ⚠️ 本爬虫仅用于合规的数据获取场景。请遵守目标站点的爬虫协议与访问频率限制，自行承担使用风险。查询条件与抓取逻辑按站点配置在 `sites/<site>.js`（`baseUrl`/`urlSuffix`/`selectors` + 可选策略钩子 `buildUrl`/`parse`/`extractId`/`isBoundary`/`blockType`/`batchSize`/`headers`，默认值内联于 `crawler.js` 的 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary`），`sites/yfbzb.js` 与 `sites/ceb.js` 为当前实站，注册表 `sites/index.js` 仅含这两站。
 
@@ -14,7 +14,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 轻量健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}`（`no-store`），不在高频探针中扫描 xlsx；供 `docker healthcheck`、反代后端摘除与监控告警使用
 - 失败页与“数据到底”分离识别：页尾 403（数据边界）不再误判为加载失败；SafeLine 拦截页在中间页按失败页计数，打在站点自报的最后一页则按边界收尾；HTTP 468 风控拦截按失败页快败并连续 2 页熔断，绝不当作数据边界
 - 失败日志带 `error.code` / HTTP `status`，便于诊断
-- 断点续跑：按站点 `state-<site>.json`（`currentPage` + `existingIds` + 可选 `realTotalPages`），中途崩溃后下次从断点继续，不重抓已完成的页；正常跑完即删，不跨天残留
+- 断点续跑：按站点 `state/<site>/checkpoint.json`（纯游标：`currentPage` + `visited` 区间 + 待补页 + `sweepId`），去重靠 `state/<site>/ids.json` 持久台账；续跑时先补扫头部若干页，避免「游标在尾部、新增全在头部」的漏抓
 - 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
 - 双通道日志：控制台中文（`[site]` 前缀，`docker logs` 可区分）+ 结构化 JSONL，按站点按日分割 `logs/<site>/crawler-YYYY-MM-DD.jsonl`、30 天保留，`pruneOldLogs(site)` 与报告同窗口清理
 - Docker 常驻：一容器并发多站点（`SITES=yfbzb,ceb`，`Promise.all` 站点并发、每站独立 `CRON_<SITE>` 定时），各站逻辑可通过 `sites/<site>.js` 策略钩子独立定制，Node 内置 `CRON_EXPR` 定时（`m h * * *`），`TZ=Asia/Shanghai`，通过绑定挂载持久化 `file/`/`logs/`
@@ -132,7 +132,7 @@ services:
       interval: 30s
 ```
 
-崩溃续跑如需保留断点，按站点分别挂载：`./state-yfbzb.json:/app/state-yfbzb.json` `./state-ceb.json:/app/state-ceb.json`。
+断点与去重台账必须挂卷，否则容器重建即丢：`./state:/app/state`（各站落在 `state/<site>/`）。
 
 **域名暴露**（推荐由外部反代承载 80/443 与 HTTPS，本容器仅暴露 8080）：
 
@@ -159,7 +159,7 @@ server {
   `crawl_end` 汇总行按「这次到底成没成」分级：一整轮没有任何页解析到内容（`level=warn`，附「本轮无任何页成功返回（疑似出口不可用）」）；有失败页时补上成功页数（`失败 3 页（成功 1 页）`），避免 99 失败 + 1 页旧数据被读成正常跑完。403 边界页和 200 零行页都不计入成功页数。
 
 - **数据**：写入 `file/<site>/`，文件名按发布日期命名，如 `file/yfbzb/2026-08-14.xlsx`。每张表包含 `id`、`title`、`link`、`noticeType`、`area`、`publishTime` 等列；每站报告（`file/<site>/index.html`/`tokens.css`/`<date>.html`）与总导航 `file/index.html`/`file/tokens.css` 同落盘，由 `server.js` 以 `HTTP_PORT` 托管：`GET /` → 总导航（`yfbzb`/`ceb` 卡片，统计 + `↗ 原站`）、`GET /<site>/` → 站点报告、`GET /health` → 轻量存活探针、`GET /<site>/<date>.xlsx` → 下载。
-- **断点续跑**：`state-<site>.json`（cwd 相对，每批结束写入，正常完成即删）。
+- **断点续跑**：`state/<site>/checkpoint.json`（cwd 相对，每批结束写入；不再删除——`sweepId` 与 `lastSweepCompletedAt` 必须跨轮存活）。去重集落在同目录 `ids.json`。
 
 ## 工作原理
 
@@ -176,9 +176,14 @@ server {
      - 已爬到有效页数上限 `min(TOTAL_PAGES, 站点分页自报总页数)`（站点未报告或解析失败时退化为仅 `TOTAL_PAGES`；每批按最新观测重算，后观测覆盖前观测）
      - 任意页返回 `endReached` 标志（即 403 —— 见下文“关于 403”）
      - 第 1 页探针因节点次数上限（`firstPageProbeLimit`）、时间上限（`firstPageProbeTimeoutMs`）、节点池轮尽或全部节点冷却返回 `gateAbort`，本轮以 `first_page_probe_limited` / `first_page_probe_timeout` / `first_page_gate_abort` / `first_page_all_cooled` 结束；非首页换点遇到全冷却以 `all_nodes_cooled` 暂停
-   - **去重**：以 `id` 为主键做两次去重——内存中比对 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）筛掉已有条目，写盘时再次合并去重（新行优先）。
+   - **去重**：以 `id` 为主键做两次去重——内存中比对 `state/<site>/ids.json` 持久台账筛掉已有条目，写盘时再次合并去重（新行优先）。台账缺失/为空（新环境首轮）时才退回 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）。台账按 `publishDate` 保留 35 天，写临时文件后 rename。
+   - **头部补扫**：续跑（`currentPage > 1`）时先从第 1 页补扫，连续 2 页整页无新增即视为追平（在批次边界上判定：`batchSize=10` 时最坏多发一批），上限 `min(HEAD_SCAN_MAX_PAGES=15, 每轮页数预算的一半)`；补扫不推进尾部游标，结束后直接跳到尾部位置，中间空档不重复请求。这是「游标在尾部、新增全在头部」的兜底。
+   - **页数预算**：每轮最多发 `SCAN_PAGE_BUDGET`（默认 30）页请求，用尽即收工、断点留给下一轮——站点每轮只放行约 30 页，多打的页只会换来一段 468。
+   - **漏的验收线**：头部新增应在 1 个 cron 周期内入库（`/status` 的 `headScannedAt` 与 `lastSweepCompletedAt` 是观测依据）；被挤出站点 3000 条分页窗口的记录属于站点可见性上限，不在补抓范围内。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
-   - **断点续跑**：每批结束写 `state-<site>.json`（`currentPage` + `existingIds` + 可选 `realTotalPages`），进程中途崩溃后下次从断点继续；正常跑完（触达边界或达 `totalPages`）后删除，不跨天残留。断点只前移不越过失败页——熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败与第一页探针轮尽都保留全部批次中最早的失败页，避免失败页被跳过后再也不重爬。
+   - **断点续跑**：每批结束写 `state/<site>/checkpoint.json`（`v:2`，纯游标：`currentPage` + `visited` 已访问区间 + `pending` 待补页 + `sweepId` + `lastSweepCompletedAt`）。游标停在「最老欠账页」——既没访问过、也不在待补清单里的最早一页；熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败、第一页探针轮尽都不得越过失败页。v1 断点（含 `existingIds`）不兼容：见到即删除并记 `checkpoint_legacy_ignored`。
+   - **完整扫描记账**：每页要么访问过、要么在待补清单里，`1..有效总页数` 全覆盖即一次完整扫描——`sweepId+1`、`visited` 清空、游标回 1、写 `lastSweepCompletedAt`。撞到边界时边界及其之后的页一次性记平（那些页本来不存在）。
+   - **468 逃逸**：同一页连续 2 轮命中 HTTP 468 才允许跳过（第 1 轮仍钉住游标），跳过的页进 `pending`、游标绕过它；每轮开头用 1 页配额复活探测 `pending` 首项，成功即移出，连续 3 轮失败记 `pending_page_given_up`（`error`）。468 是 IP 级风控，不是数据边界。
    - **优雅退出**：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 发送 `SIGTERM` 同理。
 
 ### 关于 403 与 468（重要）
@@ -226,17 +231,18 @@ server {
 ```
 crawler/
 ├── index.js              # 入口：环境变量/参数解析、校验、静态服务拉起、调度（CRON/单次常驻，每批后刷新导航）
-├── crawler.js            # 爬取核心：crawl() 编排（含真实总页数收窄上限）+ crawlPage() 逐页抓取 + 断点（按站点）
+├── crawler.js            # 爬取核心：crawl() 编排（真实总页数收窄、头部补扫、468 逃逸）+ crawlPage() 逐页抓取 + 断点（按站点）
+├── ledger.js             # 每站去重台账：state/<site>/ids.json（id → publishDate，原子写，35 天保留）
 ├── log.js                # 日志：控制台中文 + JSONL 双通道，按站点隔离，30 天保留清理
 ├── report.js             # 报告：scanFiles/generateReport 按站点生成 HTML，generateNav/buildNavHtml 生成总导航 file/index.html
-├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 轻量存活探针
+├── server.js             # 静态服务：托管 file/ 于 HTTP_PORT，路由 / → 导航、/<site>/ → 站点报告、/health 存活探针、/status 业务观测面
 ├── sites/
 │   ├── index.js          # 站点注册表：getSiteConfig(site)/parseSitesList()/listEnabledSites()（仅 yfbzb/ceb）
 │   ├── _easy_proxies.js  # 默认代理提供方：管理 API、健康节点发现、多端口轮换与订阅刷新
 │   ├── _aliyun_waf.js    # 阿里云 acw 盾页识别与 vm 沙箱求解（签名 URL + acw_tc）
 │   ├── yfbzb.js          # 实站配置：baseUrl/urlSuffix/selectors/linkPrefix + isBoundary/blockType/parseTotalPages + displayName/description/originUrl（axios）
 │   └── ceb.js            # 实站配置：axios + 代理换 IP/challenge 盾页求解/buildUrl/parse/extractId/isBoundary/batchSize:1/requestDelay/headers + displayName/originUrl
-├── test/                 # 25 个零依赖 Node 测试套件与测试夹具
+├── test/                 # 33 个零依赖 Node 测试套件与测试夹具
 │   ├── easy_proxies.test.js # 节点契约、认证/刷新降级、端口轮换
 │   ├── aliyun_waf.test.js   # acw 盾页识别/求解/重放/失败与熔断
 │   ├── safeline403.test.js  # SafeLine 403：末页按边界、中间页失败并熔断
@@ -276,7 +282,7 @@ crawler/
 │   └── agents/domain.md / issue-tracker.md
 ├── file/                 # 输出：file/index.html 总导航 + file/<site>/YYYY-MM-DD.xlsx + file/<site>/报告（绑定挂载持久化，server.js 托管）
 ├── logs/                 # 日志：logs/<site>/crawler-YYYY-MM-DD.jsonl（绑定挂载持久化）
-├── state-<site>.json     # 按站点 断点（每批写入，正常完成即删）
+├── state/<site>/         # 断点 checkpoint.json + 去重台账 ids.json + 观测面 status.json（绑定挂载持久化）
 ├── package.json
 ├── CLAUDE.md             # 给 AI 助手的代码库指引
 ├── AGENTS.md             # 贡献者指南
@@ -285,7 +291,7 @@ crawler/
 
 ## 已知限制
 
-- 去重仅比对 `file/<site>/` 下今天与昨天的 Excel，跨日重复同一公告时不保证去重（按设计：跨日抓取本就期望重复入不同日期文件）。
+- 去重主键是 `state/<site>/ids.json`；台账缺失或为空时才退回 `file/<site>/` 下今天与昨天的 Excel（新环境首轮）。被新公告挤出站点分页上限（`yfbzb` 为最新 3000 条 / 100 页）的记录无法再取回，属于站点可见性上限，不是漏抓。
 - 历史扁平 `file/*.xlsx` 保留不迁移，`readRecentIds(site)` 仅读 `file/<site>/`，旧数据不会混入新站点。
 - `CRON_EXPR`/`CRON_<SITE>` 仅支持 `m h * * *`（日/月/周必须为 `*`；m/h 支持 `*`、逗号、区间、步长，如 `35 3,15 * * *`），其他复杂表达式会在校验阶段报错；每站可独立定时。
 - 若目标站点日后上更强反爬（`acw_sc__v2` JS 挑战升级等）：`ceb` 已内置阿里云 acw 盾页求解（`sites/_aliyun_waf.js`，vm 沙箱、5s 超时），并经 `CEB_PROXY_URL=http://easy_proxies:24000` 启用多端口换 IP 兜底（管理 API `9091`，空节点池/管理面不可达时安全降级）；挑战连续 2 页不可解时熔断，不空转烧 IP。其余站点直连。
