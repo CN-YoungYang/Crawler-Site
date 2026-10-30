@@ -743,6 +743,9 @@ const CHECKPOINT_VERSION = 2;
 const FULL_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const FULL_SWEEP_START_HOUR = 2;
 const FULL_SWEEP_END_HOUR = 6;
+// 超过这个逾期时长就不再等夜间窗口：否则一次 05:5x 结束的全量会把 lastFullSweepAt
+// 推到 06:00 之后，次日 24h 到期时窗口已关，整轮全量被跳过一天。
+const FULL_SWEEP_OVERDUE_MS = 30 * 60 * 60 * 1000;
 
 function shanghaiHour(nowMs) {
   // en-GB + h23 避免午夜被格式化成 "24"
@@ -1086,9 +1089,11 @@ async function crawl(a, b, c, d) {
   // 但那不是持久台账，首次部署仍然需要一次全量播种。
   const ledgerEmpty = ledgerMap.size === 0;
   const roundNowMs = Date.now();
+  const lastFullMs = Date.parse(cp.lastFullSweepAt || '');
+  const fullSweepOverdue = Number.isFinite(lastFullMs) && roundNowMs - lastFullMs >= FULL_SWEEP_OVERDUE_MS;
   const fullSweepMode = watermarkMode
     && isFullSweepDue(cp.lastFullSweepAt, roundNowMs, ledgerEmpty)
-    && (ledgerEmpty || isInFullSweepWindow(roundNowMs));
+    && (ledgerEmpty || isInFullSweepWindow(roundNowMs) || fullSweepOverdue);
   // 尾部游标 = 断点记的那个页。头部补扫每轮都从第 1 页起，只影响本轮，不推进尾部游标——
   // 两段交替写同一个字段就会回到「谁后写谁赢」，2026-10-27 的 6→11→16 就是这么来的。
   const tailStartPage = watermarkMode ? 1 : cp.currentPage;
@@ -1181,8 +1186,13 @@ async function crawl(a, b, c, d) {
   function collectPageRows(pageData, pageNo, batchData) {
     let batchNew = 0;
     for (const item of pageData) {
-      if (existingIds.has(item.id)) continue;
       const publishDate = normalizePublishDateSafe(item.publishTime);
+      // 「本轮见到的最旧一条」要把重复行也算进去：窗口被追穿时，最旧那条往往已经在
+      // 台账里（本页零新增），只记新增行会把最旧时间报得偏新，量化丢失量就失真了。
+      if (publishDate && (!oldestSeenPublishDate || publishDate < oldestSeenPublishDate)) {
+        oldestSeenPublishDate = publishDate;
+      }
+      if (existingIds.has(item.id)) continue;
       if (!publishDate) {
         log(`发布日期无效，跳过公告：${String(item.publishTime)}`, {
           level: 'error', event: 'invalid_publish_date',
@@ -1190,7 +1200,6 @@ async function crawl(a, b, c, d) {
         });
         continue;
       }
-      if (!oldestSeenPublishDate || publishDate < oldestSeenPublishDate) oldestSeenPublishDate = publishDate;
       if (!batchData[publishDate]) batchData[publishDate] = [];
       batchData[publishDate].push(item);
       existingIds.add(item.id);
@@ -1308,6 +1317,13 @@ async function crawl(a, b, c, d) {
       if (Object.keys(reviveBatch).length) commitBatch(reviveBatch);
       log(`待补页第 ${target.page} 页复活成功（新增 ${revivedNew} 条），已移出待补清单`, { event: 'pending_page_revived', context: { page: target.page, newCount: revivedNew, pendingPages: cp.pending.length, site }, site });
     } else {
+      // 待补页复活也是一发真实请求：命中 468 同样要收手，不能「记一笔失败继续本轮」。
+      if (probe && probe.failed && stopOn468 && probe.shieldType === 'http468') {
+        rateLimitedHits++;
+        stoppedBy468 = true;
+        shouldStopCrawling = true;
+        log(`待补页第 ${target.page} 页命中 HTTP 468，立即收手 [${site}]`, { level: 'error', event: 'rate_limited_stop', context: { page: target.page, site, source: 'pending_revive' }, site });
+      }
       target.rounds = (target.rounds || 0) + 1;
       if (target.rounds >= PENDING_GIVE_UP_ROUNDS) {
         // 标记而不是删除：页仍然「不算欠账」（不会被游标拉回），但状态里看得见，
@@ -1598,8 +1614,11 @@ async function crawl(a, b, c, d) {
         headPhase = false;
         cp.headScannedAt = new Date().toISOString();
         const jumpTo = Math.max(currentPage, tailStartPage);
-        if (watermarkMode && !stoppedBy468) {
+        const caughtUp = headZeroStreak >= HEAD_SCAN_ZERO_STREAK || batchEndReached;
+        if (watermarkMode && caughtUp && !stoppedBy468) {
           log(`追水位收工 [${site}]：本轮扫到第 ${headScanEndPage} 页（${headPagesFetched} 页，连续 ${headZeroStreak} 页无新增）`, { event: 'watermark_caught_up', context: { site, pagesFetched: headPagesFetched, lastPage: headScanEndPage, zeroStreak: headZeroStreak }, site });
+        } else if (watermarkMode && !caughtUp) {
+          log(`本轮未追平 [${site}]：已扫 ${headPagesFetched} 页（${stoppedBy468 ? '被 468 截断' : '预算用尽或提前终止'}）`, { level: 'warn', event: 'watermark_round_incomplete', context: { site, pagesFetched: headPagesFetched, lastPage: headScanEndPage, zeroStreak: headZeroStreak, stoppedBy468 }, site });
         } else if (!watermarkMode) {
           log(`头部补扫结束 [${site}]：扫到第 ${headScanEndPage} 页（${headPagesFetched} 页，连续 ${headZeroStreak} 页无新增），续扫从第 ${jumpTo} 页开始`, { event: 'head_scan_done', context: { site, headPagesFetched, headScanEndPage, headZeroStreak, jumpTo, tailStartPage }, site });
         }
