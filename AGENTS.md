@@ -38,7 +38,7 @@
 - 使用 CommonJS（`require`/`module.exports`）、2 个空格缩进、分号和 `camelCase` 命名。
 - 测试文件命名为 `test/<behavior>.test.js`。
 - 命令行（CLI）用法、运行时日志和用户可见文案使用中文。
-- 保持 `crawler.js` 的边界与失败语义清晰：403 或站点 `isBoundary` 表示数据边界，不应作为网络故障重试；站点 `blockType` 命中的拦截页（`yfbzb` 的 SafeLine `/.safeline/` 403 与 HTTP 468 风控）不直接算边界——仅 `safeline` 在已知站点末页/之后（自报总页数；恢复轮无观测时用配置上限兜底）按边界收尾，其它情况快败为失败页并连续 2 页熔断；`acw` 等其它 shieldType 始终按失败页；`http468` 快败为失败页，同一页连续 2 轮命中才允许跳过并记入 `pending`（第 1 轮仍钉住游标），不做边界收尾。`isBoundary`、`blockType`、`buildUrl`、`parse`、`extractId` 和 `parseTotalPages` 通过站点策略提供。
+- 保持 `crawler.js` 的边界与失败语义清晰：403 或站点 `isBoundary` 表示数据边界，不应作为网络故障重试；站点 `blockType` 命中的拦截页（`yfbzb` 的 SafeLine `/.safeline/` 403 与 HTTP 468 风控）不直接算边界——仅 `safeline` 在已知站点末页/之后（自报总页数；恢复轮无观测时用配置上限兜底）按边界收尾，其它情况快败为失败页并连续 2 页熔断；`acw` 等其它 shieldType 始终按失败页；`http468` 快败为失败页，同一页连续 2 轮命中才允许跳过并记入 `pending`（第 1 轮仍钉住游标），不做边界收尾；站点声明 `stopOn468: true` 时改为命中即本轮收手（不重试、不翻下一页，也不进入跳过/`pending` 流程），游标留在该页由下一轮重试。`isBoundary`、`blockType`、`buildUrl`、`parse`、`extractId` 和 `parseTotalPages` 通过站点策略提供。
 - 去重主键是站点策略 `extractId` 得到的 `id`。必须保留内存过滤和合并写盘两层保护。
 - 断点为 `state/<site>/checkpoint.json`，按站点隔离；正常完成后不删除（写回 `currentPage:1` 并递增 `sweepId`），优雅中断或写盘失败时保留游标以便续跑。v1 断点（`state-<site>.json`，含 `existingIds`）不兼容：见到即删并记 `checkpoint_legacy_ignored`。
 - `backoffDelay()` 使用指数退避和全量随机抖动，基数 2 秒、上限 60 秒，并保持为纯函数。

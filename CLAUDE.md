@@ -36,7 +36,7 @@ docker compose down
 
 数据流为：`index.js` → `crawler.js` + `breaker.js` + `log.js` + `sites/` → `report.js` → `server.js`。
 
-1. **`index.js`**：解析并校验环境变量，验证 `getSiteConfig()` 和 `nextCronDelay()`，启动静态服务，预生成 `file/index.html`，刷新 easy_proxies 订阅，并为每个站点启动 `scheduleLoopForSite`。站点调度通过 `Promise.all` 并发；每轮执行 `crawl()` → `generateReport(site)` → `generateNav()`。收到 `SIGINT`/`SIGTERM` 时停止新批次并关闭 HTTP 服务。
+1. **`index.js`**：解析并校验环境变量，验证 `getSiteConfig()` 和 `nextCronDelay()`，启动静态服务，预生成 `file/index.html`，刷新 easy_proxies 订阅，并为每个站点启动 `scheduleLoopForSite`。站点调度通过 `Promise.all` 并发；每轮执行 `crawl()` → （有新数据时）`generateReport(site)` → `generateNav()`，无新增则跳过报告重生成以省下 15 分钟一轮的重扫开销。收到 `SIGINT`/`SIGTERM` 时停止新批次并关闭 HTTP 服务。
 2. **`crawler.js`**：按站点批次并发抓取。默认 `BATCH_SIZE=10`，`ceb` 使用 `batchSize:1` 和 `requestDelay` 串行限速。导出 `crawl()`、`crawlPage()`、`backoffDelay()`、`readRecentIds()`、`fileDir()`、`stateFile()`、`isStopping()` 和 `refreshProxyProviders()`。
 3. **`log.js`**：同时写中文控制台日志和按站点、按日期划分的 JSONL 日志。并发调用 `log(msg, { site })` 时必须显式传站点。
 4. **`report.js`**：扫描 `file/<site>/*.xlsx`，按站点生成索引、日期明细和共享样式，并生成 `file/index.html` 总导航。索引页内联跨日期最新 `LATEST_PREVIEW_COUNT=10` 条预览；`generateAllReports(sites)` 并发生成报告。

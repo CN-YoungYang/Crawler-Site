@@ -924,6 +924,17 @@ function saveCheckpoint(site, cp) {
   writeJsonAtomic(file, payload);
 }
 
+// 断点写失败 = 本轮进度没保存。两处调用（批间 / 轮末）都要「记一条可操作的日志 + 让本轮失败」，
+// 抽出来避免两段一模一样的 try/catch 各自漂移。
+function saveCheckpointOrThrow(site, cp) {
+  try {
+    saveCheckpoint(site, cp);
+  } catch (error) {
+    logStateWriteFailure(site, error);
+    throw error;
+  }
+}
+
 // 断点/台账写不进去时，别让运维对着裸 EACCES 猜该动哪。
 // 2026-10-29 生产日志里「台账写入失败：EACCES ... mkdir 'state/yfbzb'」连着 5 轮，
 // 没人接：消息说了错，没说这是宿主机属主问题、也没说怎么修。
@@ -1083,8 +1094,8 @@ async function crawl(a, b, c, d) {
   const tailStartPage = watermarkMode ? 1 : cp.currentPage;
   // 头部最多吃掉本轮预算的一半：预算被调小时（SCAN_PAGE_BUDGET < 2×HEAD_SCAN_MAX_PAGES）
   // 也要保证尾部还能前进，否则「补扫」会把整轮配额吃光、游标原地不动。
-  // 追水位模式没有尾部，整轮额度都归头部（最坏情况要能在一轮里追完整个 100 页窗口）。
-  const roundPageBudget = watermarkMode ? Math.max(totalPages, SCAN_PAGE_BUDGET) : SCAN_PAGE_BUDGET;
+  // 追水位模式没有尾部，整轮额度都归头部（最坏情况要能在一轮里追完整个窗口，即 totalPages）。
+  const roundPageBudget = watermarkMode ? totalPages : SCAN_PAGE_BUDGET;
   const headScanMaxPages = watermarkMode
     ? roundPageBudget
     : Math.min(HEAD_SCAN_MAX_PAGES, Math.max(1, Math.floor(SCAN_PAGE_BUDGET / 2)));
@@ -1604,12 +1615,7 @@ async function crawl(a, b, c, d) {
     if (!shouldStopCrawling) {
       cp.currentPage = tailCursor;
       cp.realTotalPages = Number.isInteger(realTotalPagesObserved) ? realTotalPagesObserved : null;
-      try {
-        saveCheckpoint(site, cp);
-      } catch (error) {
-        logStateWriteFailure(site, error);
-        throw error;
-      }
+      saveCheckpointOrThrow(site, cp);
       publishStatus();
     }
 
@@ -1714,12 +1720,7 @@ async function crawl(a, b, c, d) {
       opts: { level: checkpointLevel, event: checkpointEvent, context: { currentPage: cp.currentPage, site, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, retryFromPage, oldestUnvisitedPage: owedPage, pendingPages: cp.pending.length }, site }
     };
   }
-  try {
-    saveCheckpoint(site, cp);
-  } catch (error) {
-    logStateWriteFailure(site, error);
-    throw error;
-  }
+  saveCheckpointOrThrow(site, cp);
   // 先写盘、后宣称：这句「已保留断点」原先在写盘之前打印，EACCES 时照样输出，
   // 读日志的人只能确定「断点还在」，实际每小时从第 1 页重来（2026-10-29 连续 5 轮）。
   if (retainedNotice) log(retainedNotice.msg, retainedNotice.opts);
@@ -1748,7 +1749,7 @@ async function crawl(a, b, c, d) {
     : '';
   log(`爬取任务完成 [${site}]：新增 ${totalNew} 条（已落盘 ${totalPersisted} 条，失败 ${failedIds.size} 条），失败 ${totalFailed} 页${successSuffix}，${endReached ? '触达站点边界' : '未触达边界'}，耗时 ${(durationMs / 1000).toFixed(1)}s${fileWriteFailed ? `，文件失败 ${fileWriteFailed} 个日期` : ''}${allFailedSuffix}${narrowedSuffix}${gateSuffix}${rateLimitedHits ? `，468 命中 ${rateLimitedHits} 次` : ''}`, { level: crawlLevel, event: 'crawl_end', context: { totalNew, totalPersisted, fileWriteFailed, fileWriteSucceeded, failedIds: failedIds.size, totalFailed, pagesSucceeded, nothingSucceeded, endReached, durationMs, stoppedBySignal, gateAborted, probeLimited, probeTimedOut, allNodesCooled, rateLimitedHits, configuredTotalPages: totalPages, realTotalPages: realTotalPagesObserved ?? null, effectiveTotalPages, site }, site });
   // 返回值给调度层用：只有真的新增了数据才值得重生成 HTML（15 分钟一轮，否则一天重写 96 次）。
-  return { totalNew, totalPersisted, totalFailed, fileWriteFailed, endReached, rateLimitedHits };
+  return { totalNew };
 }
 
 function readRecentIds(site) {

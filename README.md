@@ -12,7 +12,7 @@ Node.js 爬虫，抓取 `yfbzb.com`（乙方宝官网）的招标信息公告（
 - 总导航 + 站点报告：`file/index.html` 总导航（按 `SITES` 或注册表 `sites/index.js` 生成，`yfbzb`/`ceb` 置顶，卡片含统计 `总计天数 · 总记录 · 最近更新`、主入口 `→ file/<site>/index.html`、副链 `↗ 原站`）与每站 `file/<site>/index.html`/`tokens.css`/`<date>.html`（`report.js#generateNav`/`generateReport`，`NAV_CSS`/`TOKENS_CSS`/`COMMON_CSS` 自适应），随每次爬取与启动自动刷新，缺失站点报告自动补空占位避免 404
 - 轻量静态服务：`server.js`（零依赖 `http`）托管 `file/` 于 `HTTP_PORT`（默认 8080，`EXPOSE 8080`），路由 `/` → 总导航、`/yfbzb/`/`/ceb/` → 各站报告、`HEAD` 支持、`xlsx` 下载头、防路径穿越，`HTTP_ENABLED=false` 可禁用；`docker-compose.yml` 已配 `ports: "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"` 与 `healthcheck`，适合由外部反代（Nginx/Caddy/Traefik）将 `80/443 → 8080` 以域名暴露
 - 轻量健康探针：`GET /health`/`/healthz`/`/api/health` 返回 `{status, timestamp, uptime, navExists, navGeneratedAt, totals:{sites:0,dates:0,records:0}, sites:[]}`（`no-store`），不在高频探针中扫描 xlsx；供 `docker healthcheck`、反代后端摘除与监控告警使用
-- 失败页与“数据到底”分离识别：页尾 403（数据边界）不再误判为加载失败；SafeLine 拦截页在中间页按失败页计数，打在站点自报的最后一页则按边界收尾；HTTP 468 风控拦截按失败页快败并连续 2 页熔断，绝不当作数据边界
+- 失败页与“数据到底”分离识别：页尾 403（数据边界）不再误判为加载失败；SafeLine 拦截页在中间页按失败页计数，打在站点自报的最后一页则按边界收尾；HTTP 468 风控拦截按失败页快败（`yfbzb` 声明 `stopOn468`，命中即本轮收手、不重试不翻页），绝不当作数据边界
 - 失败日志带 `error.code` / HTTP `status`，便于诊断
 - 断点续跑：按站点 `state/<site>/checkpoint.json`（纯游标：`currentPage` + `visited` 区间 + 待补页 + `sweepId`），去重靠 `state/<site>/ids.json` 持久台账；续跑时先补扫头部若干页，避免「游标在尾部、新增全在头部」的漏抓
 - 优雅退出：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 可中断定时等待
@@ -165,7 +165,7 @@ server {
 
 整体数据流（`index.js` → `crawler.js` + `log.js` + `sites/` → `report.js` → `server.js`）：
 
-1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点警告后跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → `generateReport(site)` → `generateNav()` 保证导航统计新鲜。
+1. **`index.js`**：解析环境变量（`SITES`/`TOTAL_PAGES`/`INTERVAL_MS`/`MIN_DELAY_S`/`MAX_DELAY_S`/`CRON_EXPR` + 每站覆盖 `TOTAL_PAGES_<SITE>`/`INTERVAL_MS_<SITE>`/`MIN_DELAY_S_<SITE>`/`MAX_DELAY_S_<SITE>`/`CRON_<SITE>`/`SITES_CONFIG` JSON、`HTTP_PORT`/`HTTP_ENABLED`，未设回退到位置参数）并校验（逐站 `getSiteConfig(site)` 与 `nextCronDelay(cronExpr)`，占位站点警告后跳过），应用每站独立的启动前随机延迟，随后拉起 `server.js` 静态服务（`startServer()`，`HTTP_PORT` 默认 8080，`EXPOSE 8080`，`healthcheck` 在 `/health`）并预生成总导航 `generateNav()`，再进入 Node 内置调度器 `scheduleLoop`：每站一 `scheduleLoopForSite` 并发（`Promise.all`），`CRON_EXPR`/`CRON_<SITE>` 为空则单次运行后常驻等待，设为 `m h * * *` 则每站独立每日定时触发，等待可被 `SIGTERM`/`SIGINT` 按秒中断（`sleepInterruptible` 1s 轮询 `isStopping()`），退出时一并关闭 HTTP 服务；每站 `runOnce` 内 `crawl()` → （有新数据时）`generateReport(site)` → `generateNav()` 保证导航统计新鲜，无新增则跳过报告重生成（15 分钟一轮时省下反复扫全部 xlsx）。
 
 2. **`crawler.js`**（日志经 `log.js` 双通道输出，站点隔离，显式 `log(msg,{site})` 避免并发竞态）：
    - **站点策略**：`sites/yfbzb.js` 实站（`axios`，含 `isBoundary`/`blockType`（SafeLine 403 / HTTP 468）与 `parseTotalPages` 真实总页数钩子）、`sites/ceb.js` 实站（`axios` + 代理换 IP + 阿里云 WAF 挑战求解，`batchSize:1`/`requestDelay`/`isBoundary` 区分）、`sites/index.js` 注册表 `getSiteConfig(site)`/`parseSitesList()`/`listEnabledSites()`（仅 `yfbzb`/`ceb`）；默认策略 `defaultBuildUrl`/`defaultParse`/`defaultExtractId`/`defaultIsBoundary` 内联于 `crawler.js`。`crawl({site,…})` / `crawlPage(pageNo, siteConfig, …)` 委托站点策略，缺省走 `selectors` + `linkPrefix` 默认解析。
@@ -179,11 +179,12 @@ server {
    - **去重**：以 `id` 为主键做两次去重——内存中比对 `state/<site>/ids.json` 持久台账筛掉已有条目，写盘时再次合并去重（新行优先）。台账缺失/为空（新环境首轮）时才退回 `readRecentIds(site)`（读 `file/<site>/` 下今日与昨日的 Excel）。台账按 `publishDate` 保留 35 天，写临时文件后 rename。
    - **头部补扫**：续跑（`currentPage > 1`）时先从第 1 页补扫，连续 2 页整页无新增即视为追平（在批次边界上判定：`batchSize=10` 时最坏多发一批），上限 `min(HEAD_SCAN_MAX_PAGES=15, 每轮页数预算的一半)`；补扫不推进尾部游标，结束后直接跳到尾部位置，中间空档不重复请求。这是「游标在尾部、新增全在头部」的兜底。
    - **页数预算**：每轮最多发 `SCAN_PAGE_BUDGET`（默认 30）页请求，用尽即收工、断点留给下一轮——站点每轮只放行约 30 页，多打的页只会换来一段 468。
+    - **追水位扫描（`yfbzb`）**：`scanMode: 'watermark'` 时每轮从第 1 页起、连续 2 页零新增即收工（不维护尾部游标），单轮上限 `TOTAL_PAGES`（100 页）；`batchSize: 1` + `requestDelay` 2–3 秒抖动，`stopOn468: true` 命中即本轮收手。每 24h 且在 02:00–06:00 之间跑一次 100 页全量（`lastFullSweepAt` 记在断点里；台账为空时立即播种，不受时段限制）；扫满 100 页仍未追平记 `watermark_not_reached`，连续 2 轮升级 `watermark_still_behind`。
    - **漏的验收线**：头部新增应在 1 个 cron 周期内入库（`/status` 的 `headScannedAt` 与 `lastSweepCompletedAt` 是观测依据）；被挤出站点 3000 条分页窗口的记录属于站点可见性上限，不在补抓范围内。
    - **分区写盘**：按 `publishTime` 分组，读已有 `file/<site>/<date>.xlsx` → 合并新行（新行优先）→ 整文件回写。
    - **断点续跑**：每批结束写 `state/<site>/checkpoint.json`（`v:2`，纯游标：`currentPage` + `visited` 已访问区间 + `pending` 待补页 + `sweepId` + `lastSweepCompletedAt`）。游标停在「最老欠账页」——既没访问过、也不在待补清单里的最早一页；熔断（WAF 盾不可解 / 连续 405 / 网络连败）、写盘失败、第一页探针轮尽都不得越过失败页。v1 断点（含 `existingIds`）不兼容：见到即删除并记 `checkpoint_legacy_ignored`。
    - **完整扫描记账**：每页要么访问过、要么在待补清单里，`1..有效总页数` 全覆盖即一次完整扫描——`sweepId+1`、`visited` 清空、游标回 1、写 `lastSweepCompletedAt`。撞到边界时边界及其之后的页一次性记平（那些页本来不存在）。
-   - **468 逃逸**：同一页连续 2 轮命中 HTTP 468 才允许跳过（第 1 轮仍钉住游标），跳过的页进 `pending`、游标绕过它；每轮开头用 1 页配额复活探测 `pending` 首项，成功即移出，连续 3 轮失败记 `pending_page_given_up`（`error`）。468 是 IP 级风控，不是数据边界。
+   - **468 逃逸**：同一页连续 2 轮命中 HTTP 468 才允许跳过（第 1 轮仍钉住游标），跳过的页进 `pending`、游标绕过它；每轮开头用 1 页配额复活探测 `pending` 首项，成功即移出，连续 3 轮失败记 `pending_page_given_up`（`error`）。468 是 IP 级风控，不是数据边界；声明 `stopOn468` 的站点（`yfbzb`）不进入这套跳过流程——命中即本轮收手，游标留在该页。
    - **优雅退出**：捕获 `SIGINT`/`SIGTERM`，等当前批次完成后落盘再退出（二次 Ctrl+C 强制退出），`docker stop` 发送 `SIGTERM` 同理。
 
 ### 关于 403 与 468（重要）
@@ -194,7 +195,7 @@ server {
 
 - 打在已知站点末页（站点自报的最后一页或之后；恢复轮无成功页可观测时用配置 `TOTAL_PAGES` 兜底）：按数据边界收尾（`endReached`），不重试、不计失败；边界前若有失败页，断点仍指向最早失败页。JSONL 记 `boundary_blocked_last_page`（`warn`）；
 - 其它情况（中间页、配置上限小于真实页数）：快败为失败页（同一出口重试只会再吃拦截页），连续 2 页触发熔断并保留断点，避免临时封禁被当成“已到底”而静默漏数据；
-- HTTP 468 是站点风控拦截（2026-10-28 生产日志：`yfbzb` 第 61-99 页连续命中）：`blockType` 返回 `http468`，快败为失败页、计入连续盾页，连续 2 页熔断并保留断点；468 永不按数据边界收尾；
+- HTTP 468 是站点风控拦截（2026-10-28 生产日志：`yfbzb` 第 61-99 页连续命中）：`blockType` 返回 `http468`，快败为失败页、计入连续盾页，连续 2 页熔断并保留断点；`yfbzb` 现声明 `stopOn468`，单页命中即本轮收手（15 分钟后下一轮再追）；468 永不按数据边界收尾；
 - 没有 SafeLine 指纹的 403 仍是普通数据边界：不重试，标记 `endReached` 并干净停止；
 - 网络/超时才进入重试与退避；405 不在同一出口上重试——`ceb` 单发 405 即冷却节点并换 IP（`failFast405`），其它站点按 `fallbackOn405` 决定是否降级 POST；SafeLine 403 与 HTTP 468 拦截页不重试——SafeLine 中间页计入失败页数、已知末页按边界收尾，468 始终计入失败页并熔断。
 
