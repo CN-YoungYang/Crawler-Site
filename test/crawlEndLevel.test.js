@@ -8,6 +8,7 @@
 // 期望值来自独立真相源：失败页数与新增条数是规格里已有的语义，
 // 「全部页面都失败 → 这次运行无效」不依赖实现细节。
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const fs = require('fs');
 const path = require('path');
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter } = require('./helper');

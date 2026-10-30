@@ -6,6 +6,7 @@
 //   - 连续 2 页整页无新增就判定追平（批次边界上生效）
 //   - 补扫结束后直接跳到尾部游标，中间空档不重复请求
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const fs = require('fs');
 const path = require('path');
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, setEnv, checkpointPath } = require('./helper');

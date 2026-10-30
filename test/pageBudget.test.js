@@ -4,6 +4,7 @@
 // 一轮把 100 页全打一遍，只会把剩下的 70 页变成一段 468，还顺带把出口打脏。
 // 预算用尽就收工，剩下的页留给下一轮——断点负责记住停在哪。
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, readCheckpoint, setEnv } = require('./helper');
 const { pageHtml, yfbzbRow } = require('./fixtures');
 

@@ -9,6 +9,7 @@
 //   - 跳过的页进 pending，游标绕过它继续前进
 //   - 每轮开头用 1 页配额复活探测 pending 首项，成功即移出并计入覆盖
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const fs = require('fs');
 const path = require('path');
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, readCheckpoint, readLedgerIds } = require('./helper');

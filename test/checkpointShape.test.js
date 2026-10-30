@@ -7,6 +7,7 @@
 //   - 468 熔断 → 游标停在首个被拦页、visited 只含成功页
 //   - 老 state-<site>.json 不兼容 → 删除并记 warn，不当断点用
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const fs = require('fs');
 const path = require('path');
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents, readCheckpoint } = require('./helper');

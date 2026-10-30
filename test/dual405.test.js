@@ -4,6 +4,7 @@
 // (c) 连续无 status 失败（ECONNRESET/超时）达熔断阈值 → crawl 提前结束，不再爬满 totalPages
 // (d) easy_proxies 独立端口换点：第一页失败时按序切换节点，成功或节点池轮尽即停止
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const { mockAxios, freshCrawler, withTempCwd, setEnv } = require('./helper');
 const { pageHtml, ROW_NEW } = require('./fixtures');
 

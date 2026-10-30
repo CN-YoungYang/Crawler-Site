@@ -11,6 +11,7 @@
 //
 // 接缝：crawl() 公开接口 + logs/<site>/*.jsonl 的 crawl_end 事件 + state 文件。
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const fs = require('fs');
 const path = require('path');
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readCheckpoint } = require('./helper');

@@ -3,6 +3,8 @@ const { generateReport, generateNav } = require('./report');
 const { log } = require('./log');
 const { startServer } = require('./server');
 const { getSiteConfig, normalizeSite, parseSitesList } = require('./sites');
+const fs = require('fs');
+const path = require('path');
 
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -225,11 +227,17 @@ async function scheduleLoopForSite({ site, totalPages, interval, minDelay, maxDe
     const slept = await sleepInterruptible(initialDelay);
     if (!slept || isStopping()) return;
     // 开始爬取由 crawler.js#crawl 的 crawl_start 事件记录，此处不再重复打点
+    let round = null;
     try {
-      await crawl({ site: siteNorm, totalPages, interval });
-      log('爬取任务已完成', { event: 'schedule_run_done', context: { site: siteNorm }, site: siteNorm });
+      round = await crawl({ site: siteNorm, totalPages, interval });
+      log('爬取任务已完成', { event: 'schedule_run_done', context: { site: siteNorm, totalNew: round ? round.totalNew : null }, site: siteNorm });
     } catch (error) {
       log(`爬取过程中出现错误: ${error.message}`, { level: 'error', event: 'schedule_run_error', context: { site: siteNorm, error: error.message }, site: siteNorm });
+    }
+    // 15 分钟一轮：没有新数据就不必重扫全部 xlsx 重写 HTML（一天 96 次会白烧 CPU/磁盘）。
+    if (!round || round.totalNew === 0) {
+      log(`本轮没有新数据，跳过报告重生成 [${siteNorm}]`, { event: 'report_skipped_no_new', context: { site: siteNorm }, site: siteNorm });
+      return;
     }
     try {
       await generateReport(siteNorm);
@@ -332,9 +340,33 @@ async function scheduleLoop(input) {
 
 // sleepInterruptible 已收敛至 crawler.js（单例，避免双份轮询实现）
 
+// state/<site>/ 是断点与去重台账的家：写不进去，整轮扫描就白扫。
+// 启动时先探一次，把「宿主机属主不对」说在第一行日志里——2026-10-29 那次是每小时
+// 跑完一整轮、写完 Excel 才在末尾抛 EACCES，连着两晚没人发现台账一直是空的。
+// 探针失败只告警不退出：state 坏了，Excel/报告这条真正交付的链路仍然是通的。
+function preflightStateDirs(sites) {
+  for (const site of sites) {
+    const dir = path.join('state', normalizeSite(site));
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const probe = path.join(dir, `.write-probe-${process.pid}`);
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+    } catch (error) {
+      log(`state 目录不可写 [${site}]：${dir}：${error.message}。断点与去重台账都落在这里，不修的话每轮都从第 1 页重来、去重退化成「最近两天 Excel」。宿主机执行 chown -R 1000:1000 state，或重建容器让 docker-entrypoint.sh 自动 chown。`, {
+        level: 'error',
+        event: 'state_dir_unwritable',
+        context: { site: normalizeSite(site), dir, error: error.message, code: error.code || null },
+        site: normalizeSite(site)
+      });
+    }
+  }
+}
+
 if (require.main === module) {
   const env = parseEnv();
   validateInput(env);
+  preflightStateDirs(env.sites);
   // 启动静态文件服务（托管 file/，根路径为总导航）
   const httpServer = startServer();
   // 尽力预生成导航页，使域名访问立即可用（不阻塞爬取调度）

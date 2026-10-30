@@ -15,7 +15,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 
 COPY . .
 
-RUN mkdir -p /app/file /app/logs && chown -R node:node /app && chmod +x /app/docker-entrypoint.sh
+RUN mkdir -p /app/file /app/logs /app/state && chown -R node:node /app && chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8080
 

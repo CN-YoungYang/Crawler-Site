@@ -64,6 +64,20 @@ module.exports = {
     area: 'td:nth-child(3)',
     publishTime: 'td:nth-child(4)'
   },
+  // 追水位扫描：每轮从第 1 页起，连续 2 页零新增即收工（见 crawler.js#watermarkMode）。
+  // batchSize 1：站点按页返回 30 条，串行翻页 + requestDelay 抖动是压 468 的主要手段。
+  scanMode: 'watermark',
+  batchSize: 1,
+  // 468 是站点级风控，命中即收手（见 crawler.js#stopOn468），不重试、不翻下一页。
+  stopOn468: true,
+  // 串行 + 每页 2-3 秒随机抖动：压 468 的主要手段。
+  // 2026-10-28 第 61-99 页连续命中 468，就是「固定节拍 + 瞬时并发 + 连续深翻」的产物。
+  requestDelay: { min: 2000, max: 3000 },
+  headers: {
+    // 让翻页看起来像站内点击（分页 JS 是表单 GET 提交），而不是裸脚本
+    Referer: 'https://www.yfbzb.com/search/invitedBidSearch',
+    'Accept-Language': 'zh-CN,zh;q=0.9'
+  },
   // 可选策略钩子（全部可选，缺省走 crawler.js 内联默认行为）：
   // buildUrl(pageNo) { return `${this.baseUrl}${pageNo}${this.urlSuffix}`; },
   // extractId(link) { return link.split('/').pop().split('.')[0]; },

@@ -105,6 +105,21 @@ async function withNoJitter(fn) {
   try { return await fn(); } finally { Math.random = previous; }
 }
 
+// 旧扫描策略的 yfbzb：2026-10-30 起 yfbzb 改成「追水位」站点（scanMode/batchSize 1/468 即停）。
+// 那批测通用机制的用例（批次大小、页数预算、熔断、续跑）测的不是 yfbzb 的站点策略，
+// 不该被站点配置的改动牵连——在各自进程里把注册表覆盖回旧值即可。
+// 只改内存里的 registry，不写文件；每个测试文件是独立进程，互不影响。
+function useLegacyYfbzb() {
+  const registry = require('../sites').registry;
+  registry.yfbzb = {
+    ...registry.yfbzb,
+    scanMode: undefined,
+    stopOn468: false,
+    batchSize: 10,
+    requestDelay: undefined
+  };
+}
+
 // 断点路径：v2 起落在 state/<site>/checkpoint.json（整目录可挂卷）。
 // 测试不自己拼路径，避免实现换布局时十几处一起漂。
 function checkpointPath(site) {
@@ -128,4 +143,4 @@ function readLedgerIds(site) {
   return Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).ids || {});
 }
 
-module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter, readEvents, checkpointPath, readCheckpoint, ledgerPath, readLedgerIds };
+module.exports = { mockAxios, freshCrawler, withTempCwd, setEnv, withNoJitter, readEvents, checkpointPath, readCheckpoint, ledgerPath, readLedgerIds, useLegacyYfbzb };

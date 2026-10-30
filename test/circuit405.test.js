@@ -11,6 +11,7 @@
 // 期望值来自独立真相源（ADR 0001 的事故记录 + consecutive405>=2 的阈值语义），
 // 不是照抄实现：熔断生效 → 只跑完第 1 批；熔断失效 → 跑满 100 页。
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const { mockAxios, freshCrawler, withTempCwd } = require('./helper');
 const { pageHtml, yfbzbRow } = require('./fixtures');
 

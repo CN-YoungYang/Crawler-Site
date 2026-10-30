@@ -5,6 +5,7 @@
 //
 // 接缝：crawlPage(1, siteConfig, existingIds, maxRetries) 的返回值与真实请求次数。
 const assert = require('assert');
+require('./helper').useLegacyYfbzb(); // 本文件测通用机制，用旧扫描策略的 yfbzb
 const { mockAxios, freshCrawler, withTempCwd, withNoJitter, readEvents } = require('./helper');
 const sitesIndex = require('../sites');
 
