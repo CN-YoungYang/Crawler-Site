@@ -43,7 +43,7 @@
 - 断点为 `state/<site>/checkpoint.json`，按站点隔离；正常完成后不删除（写回 `currentPage:1` 并递增 `sweepId`），优雅中断或写盘失败时保留游标以便续跑。v1 断点（`state-<site>.json`，含 `existingIds`）不兼容：见到即删并记 `checkpoint_legacy_ignored`。
 - `backoffDelay()` 使用指数退避和全量随机抖动，基数 2 秒、上限 60 秒，并保持为纯函数。
 - `failFast405` 单发快败（`ceb`，不做 GET→POST）、未启用站点的 `GET 405 → POST` 降级、双 405 快败、节点端口轮换、第一页 `gateAbort`、网络失败换 IP 和熔断必须保持对 `axios` 全链路有效。
-- 每站点可以覆盖 `batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`rotateEveryPages`、`firstPageProbeLimit` 和 `firstPageProbeTimeoutMs`；没有覆盖时使用 `BATCH_SIZE`、`FAILURE_STOP_THRESHOLD`、`REQUEST_TIMEOUT` 和 `USER_AGENT` 默认值。
+- 每站点可以覆盖 `batchSize`、`failureThreshold`、`timeout`、`headers`、`proxy`、`requestDelay`、`failFast405`、`fallbackOn405`、`scanMode`、`stopOn468`、`rotateEveryPages`、`firstPageProbeLimit` 和 `firstPageProbeTimeoutMs`；没有覆盖时使用 `BATCH_SIZE`、`FAILURE_STOP_THRESHOLD`、`REQUEST_TIMEOUT` 和 `USER_AGENT` 默认值。`scanMode: 'watermark'` 表示追水位扫描（每轮从第 1 页起、连续 2 页零新增即停、单轮上限 100 页，游标固定在页首）；`stopOn468: true` 表示命中 HTTP 468 立即收手，不重试、不翻下一页。
 
 ## 测试约定
 
